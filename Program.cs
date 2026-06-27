@@ -35,9 +35,14 @@ class Program
         {
             try
             {
-                var analyzer = new DependencyAnalyzer();
-                await analyzer.AnalyzeAndGenerateMarkdown(file.FullName, rootDir.FullName, output.FullName);
+                var analyzer = new ClassContextAnalyzer();
+                var result = await analyzer.AnalyzeAsync(file.FullName, rootDir.FullName);
+                
+                var generator = new MarkdownGenerator();
+                await generator.GenerateAsync(result, output.FullName);
+                
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
+                Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
             }
             catch (Exception ex)
             {
@@ -50,22 +55,90 @@ class Program
     }
 }
 
-public class DependencyAnalyzer
+#region Analysis Models
+
+public class ClassContextAnalysisResult
+{
+    public Dictionary<string, SourceFileInfo> SourceFiles { get; set; } = new();
+    public Dictionary<string, HashSet<string>> TypeReferences { get; set; } = new();
+    public Dictionary<string, HashSet<string>> DependencyRelationships { get; set; } = new();
+    public List<AnalysisDiagnostic> Diagnostics { get; set; } = new();
+}
+
+public class SourceFileInfo
+{
+    public string FilePath { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public DateTime LastModified { get; set; }
+    public HashSet<string> DefinedTypes { get; set; } = new();
+}
+
+public class AnalysisDiagnostic
+{
+    public string FilePath { get; set; } = string.Empty;
+    public DiagnosticSeverity Severity { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public int? LineNumber { get; set; }
+    public int? ColumnNumber { get; set; }
+}
+
+public enum DiagnosticSeverity
+{
+    Info,
+    Warning,
+    Error
+}
+
+#endregion
+
+#region Analyzer Interface and Implementation
+
+public interface IClassContextAnalyzer
+{
+    Task<ClassContextAnalysisResult> AnalyzeAsync(string filePath, string rootDirectory);
+}
+
+public class ClassContextAnalyzer : IClassContextAnalyzer
 {
     private readonly HashSet<string> _processedFiles = new();
     private readonly Dictionary<string, string> _fileContents = new();
     private readonly Dictionary<string, HashSet<string>> _typeReferences = new();
+    private readonly Dictionary<string, HashSet<string>> _dependencyRelationships = new();
+    private readonly List<AnalysisDiagnostic> _diagnostics = new();
 
-    public async Task AnalyzeAndGenerateMarkdown(string filePath, string rootDirectory, string outputPath)
+    public async Task<ClassContextAnalysisResult> AnalyzeAsync(string filePath, string rootDirectory)
     {
         if (!File.Exists(filePath))
+        {
+            _diagnostics.Add(new AnalysisDiagnostic
+            {
+                FilePath = filePath,
+                Severity = DiagnosticSeverity.Error,
+                Message = $"File not found: {filePath}"
+            });
             throw new FileNotFoundException($"File not found: {filePath}");
+        }
 
         // Start with initial file
         await AnalyzeFileRecursive(filePath, rootDirectory);
 
-        // Generate markdown output
-        await GenerateMarkdownOutput(outputPath);
+        // Build result
+        return new ClassContextAnalysisResult
+        {
+            SourceFiles = _fileContents.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new SourceFileInfo
+                {
+                    FilePath = kvp.Key,
+                    Content = kvp.Value,
+                    LastModified = File.GetLastWriteTime(kvp.Key),
+                    DefinedTypes = ExtractDefinedTypes(kvp.Value)
+                }
+            ),
+            TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(_dependencyRelationships),
+            Diagnostics = new List<AnalysisDiagnostic>(_diagnostics)
+        };
     }
 
     private async Task AnalyzeFileRecursive(string filePath, string rootDirectory)
@@ -84,6 +157,15 @@ public class DependencyAnalyzer
         walker.Visit(root);
 
         _typeReferences[filePath] = walker.ReferencedTypes;
+
+        // Build dependency relationships
+        foreach (var referencedType in walker.ReferencedTypes)
+        {
+            if (!_dependencyRelationships.ContainsKey(filePath))
+                _dependencyRelationships[filePath] = new HashSet<string>();
+            
+            _dependencyRelationships[filePath].Add(referencedType);
+        }
 
         // For each referenced type, try to find its definition file
         foreach (var typeName in walker.ReferencedTypes)
@@ -119,26 +201,78 @@ public class DependencyAnalyzer
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error analyzing {candidateFile}: {ex.Message}");
+                _diagnostics.Add(new AnalysisDiagnostic
+                {
+                    FilePath = candidateFile,
+                    Severity = DiagnosticSeverity.Warning,
+                    Message = $"Error analyzing file: {ex.Message}"
+                });
             }
         }
     }
 
-    private async Task GenerateMarkdownOutput(string outputPath)
+    private HashSet<string> ExtractDefinedTypes(string fileContent)
+    {
+        var definedTypes = new HashSet<string>();
+        var tree = CSharpSyntaxTree.ParseText(fileContent);
+        var root = tree.GetCompilationUnitRoot();
+
+        var typeCollector = new TypeDefinitionCollector();
+        typeCollector.Visit(root);
+
+        foreach (var type in typeCollector.DefinedTypes)
+        {
+            definedTypes.Add(type);
+        }
+
+        return definedTypes;
+    }
+}
+
+#endregion
+
+#region Markdown Generator
+
+public interface IMarkdownGenerator
+{
+    Task GenerateAsync(ClassContextAnalysisResult result, string outputPath);
+}
+
+public class MarkdownGenerator : IMarkdownGenerator
+{
+    public async Task GenerateAsync(ClassContextAnalysisResult result, string outputPath)
     {
         using var writer = new StreamWriter(outputPath);
 
-        foreach (var kvp in _fileContents.OrderBy(x => x.Key))
+        foreach (var kvp in result.SourceFiles.OrderBy(x => x.Key))
         {
             await writer.WriteLineAsync($"// {kvp.Key}");
             await writer.WriteLineAsync("```csharp");
-            await writer.WriteLineAsync(kvp.Value);
+            await writer.WriteLineAsync(kvp.Value.Content);
             await writer.WriteLineAsync("```");
             await writer.WriteLineAsync();
             await writer.WriteLineAsync();
         }
     }
 }
+
+#endregion
+
+#region Legacy DependencyAnalyzer (for backward compatibility)
+
+public class DependencyAnalyzer
+{
+    private readonly ClassContextAnalyzer _analyzer = new();
+    private readonly MarkdownGenerator _generator = new();
+
+    public async Task AnalyzeAndGenerateMarkdown(string filePath, string rootDirectory, string outputPath)
+    {
+        var result = await _analyzer.AnalyzeAsync(filePath, rootDirectory);
+        await _generator.GenerateAsync(result, outputPath);
+    }
+}
+
+#endregion
 
 public class TypeReferenceWalker : CSharpSyntaxWalker
 {
@@ -181,12 +315,18 @@ public class TypeReferenceWalker : CSharpSyntaxWalker
     public override void VisitMethodDeclaration(MethodDeclarationSyntax node)
     {
         // Add return type reference
-        AddTypeReference(node.ReturnType);
+        if (node.ReturnType != null)
+        {
+            AddTypeReference(node.ReturnType);
+        }
 
         // Add parameter type references
         foreach (var param in node.ParameterList.Parameters)
         {
-            AddTypeReference(param.Type);
+            if (param.Type != null)
+            {
+                AddTypeReference(param.Type);
+            }
         }
 
         base.VisitMethodDeclaration(node);
@@ -213,7 +353,10 @@ public class TypeReferenceWalker : CSharpSyntaxWalker
         // Add parameter type references
         foreach (var param in node.ParameterList.Parameters)
         {
-            AddTypeReference(param.Type);
+            if (param.Type != null)
+            {
+                AddTypeReference(param.Type);
+            }
         }
 
         base.VisitConstructorDeclaration(node);
@@ -346,5 +489,40 @@ public class TypeDefinitionWalker : CSharpSyntaxWalker
         }
 
         base.VisitEnumDeclaration(node);
+    }
+}
+
+public class TypeDefinitionCollector : CSharpSyntaxWalker
+{
+    public HashSet<string> DefinedTypes { get; } = new();
+
+    public override void VisitClassDeclaration(ClassDeclarationSyntax node)
+    {
+        DefinedTypes.Add(node.Identifier.ValueText);
+        base.VisitClassDeclaration(node);
+    }
+
+    public override void VisitInterfaceDeclaration(InterfaceDeclarationSyntax node)
+    {
+        DefinedTypes.Add(node.Identifier.ValueText);
+        base.VisitInterfaceDeclaration(node);
+    }
+
+    public override void VisitStructDeclaration(StructDeclarationSyntax node)
+    {
+        DefinedTypes.Add(node.Identifier.ValueText);
+        base.VisitStructDeclaration(node);
+    }
+
+    public override void VisitEnumDeclaration(EnumDeclarationSyntax node)
+    {
+        DefinedTypes.Add(node.Identifier.ValueText);
+        base.VisitEnumDeclaration(node);
+    }
+
+    public override void VisitRecordDeclaration(RecordDeclarationSyntax node)
+    {
+        DefinedTypes.Add(node.Identifier.ValueText);
+        base.VisitRecordDeclaration(node);
     }
 }
