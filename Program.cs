@@ -5,9 +5,9 @@ using System.CommandLine;
 
 namespace ClassContextAnalyzer;
 
-class Program
+class AnalyzerProgram
 {
-    static async Task<int> Main(string[] args)
+    static async Task<int> AnalyzerMain(string[] args)
     {
         var fileOption = new Option<FileInfo>(
             name: "--file",
@@ -31,6 +31,11 @@ class Program
             description: "Output format: markdown or csharp-project",
             getDefaultValue: () => "markdown");
 
+        var optimizeOption = new Option<bool>(
+            name: "--optimize",
+            description: "Use optimized analyzer with source index (recommended for large projects)",
+            getDefaultValue: () => true);
+
         formatOption.AddValidator(result =>
         {
             var format = result.GetValueOrDefault<string>();
@@ -45,14 +50,19 @@ class Program
         rootCommand.AddOption(rootDirOption);
         rootCommand.AddOption(outputOption);
         rootCommand.AddOption(formatOption);
+        rootCommand.AddOption(optimizeOption);
 
-        rootCommand.SetHandler(async (file, rootDir, output, format) =>
+        rootCommand.SetHandler(async (file, rootDir, output, format, optimize) =>
         {
             try
             {
-                var analyzer = new ClassContextAnalyzer();
+                IClassContextAnalyzer analyzer = optimize
+                    ? new ClassContextAnalyzerWithSourceIndex()
+                    : new ClassContextAnalyzer();
+
+                Console.WriteLine($"Using {(optimize ? "optimized" : "original")} analyzer...");
                 var result = await analyzer.AnalyzeAsync(file.FullName, rootDir.FullName);
-                
+
                 if (format == "markdown")
                 {
                     var generator = new MarkdownGenerator();
@@ -63,7 +73,7 @@ class Program
                     var generator = new CSharpProjectGenerator();
                     await generator.GenerateAsync(result, output.FullName);
                 }
-                
+
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
                 Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
             }
@@ -72,7 +82,7 @@ class Program
                 Console.Error.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, fileOption, rootDirOption, outputOption, formatOption);
+        }, fileOption, rootDirOption, outputOption, formatOption, optimizeOption);
 
         return await rootCommand.InvokeAsync(args);
     }
@@ -186,7 +196,7 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         {
             if (!_dependencyRelationships.ContainsKey(filePath))
                 _dependencyRelationships[filePath] = new HashSet<string>();
-            
+
             _dependencyRelationships[filePath].Add(referencedType);
         }
 
@@ -298,7 +308,7 @@ public class CSharpProjectGenerator : IProjectGenerator
         {
             outputDir.Create();
         }
-        
+
         // Write all .cs files
         foreach (var kvp in result.SourceFiles)
         {
@@ -306,13 +316,13 @@ public class CSharpProjectGenerator : IProjectGenerator
             var outputFilePath = Path.Combine(outputPath, originalFileName);
             await File.WriteAllTextAsync(outputFilePath, kvp.Value.Content);
         }
-        
+
         // Generate and write .csproj file
         var csprojContent = GenerateCsprojContent();
         var csprojPath = Path.Combine(outputPath, "ExtractedClasses.csproj");
         await File.WriteAllTextAsync(csprojPath, csprojContent);
     }
-    
+
     private string GenerateCsprojContent()
     {
         return @"<Project Sdk=""Microsoft.NET.Sdk"">
@@ -494,21 +504,21 @@ public class TypeReferenceWalker : CSharpSyntaxWalker
     private static bool IsKeyword(string identifier)
     {
         var keywords = new[] { "int", "string", "bool", "double", "float", "char", "long", "short",
-                              "byte", "uint", "ulong", "ushort", "sbyte", "decimal", "object", "void",
-                              "var", "dynamic", "async", "await", "yield", "return", "if", "else",
-                              "for", "foreach", "while", "do", "switch", "case", "default", "break",
-                              "continue", "goto", "try", "catch", "finally", "throw", "new", "this",
-                              "base", "null", "true", "false", "typeof", "sizeof", "nameof", "is",
-                              "as", "from", "where", "select", "group", "into", "orderby", "join",
-                              "let", "in", "on", "equals", "by", "ascending", "descending" };
+                               "byte", "uint", "ulong", "ushort", "sbyte", "decimal", "object", "void",
+                               "var", "dynamic", "async", "await", "yield", "return", "if", "else",
+                               "for", "foreach", "while", "do", "switch", "case", "default", "break",
+                               "continue", "goto", "try", "catch", "finally", "throw", "new", "this",
+                               "base", "null", "true", "false", "typeof", "sizeof", "nameof", "is",
+                               "as", "from", "where", "select", "group", "into", "orderby", "join",
+                               "let", "in", "on", "equals", "by", "ascending", "descending" };
         return keywords.Contains(identifier);
     }
 
     private static bool IsBuiltInType(string identifier)
     {
         var builtInTypes = new[] { "String", "Int32", "Boolean", "Double", "Single", "Char",
-                                  "Int64", "Int16", "Byte", "UInt32", "UInt64", "UInt16",
-                                  "SByte", "Decimal", "Object", "Void" };
+                                   "Int64", "Int16", "Byte", "UInt32", "UInt64", "UInt16",
+                                   "SByte", "Decimal", "Object", "Void" };
         return builtInTypes.Contains(identifier);
     }
 }
@@ -596,5 +606,89 @@ public class TypeDefinitionCollector : CSharpSyntaxWalker
     {
         DefinedTypes.Add(node.Identifier.ValueText);
         base.VisitRecordDeclaration(node);
+    }
+}
+
+// Provide a way to run the analyzer from the benchmark
+public static class AnalyzerLauncher
+{
+    public static async Task<int> Run(string[] args)
+    {
+        var fileOption = new Option<FileInfo>(
+            name: "--file",
+            description: "The C# file to analyze")
+        {
+            IsRequired = true
+        }.ExistingOnly();
+
+        var outputOption = new Option<FileInfo>(
+            name: "--output",
+            description: "Output markdown file path",
+            getDefaultValue: () => new FileInfo("output.md"));
+
+        var rootDirOption = new Option<DirectoryInfo>(
+            name: "--root-dir",
+            description: "Root directory to search for dependency files",
+            getDefaultValue: () => new DirectoryInfo(Directory.GetCurrentDirectory()));
+
+        var formatOption = new Option<string>(
+            name: "--format",
+            description: "Output format: markdown or csharp-project",
+            getDefaultValue: () => "markdown");
+
+        var optimizeOption = new Option<bool>(
+            name: "--optimize",
+            description: "Use optimized analyzer with source index (recommended for large projects)",
+            getDefaultValue: () => true);
+
+        formatOption.AddValidator(result =>
+        {
+            var format = result.GetValueOrDefault<string>();
+            if (format != "markdown" && format != "csharp-project")
+            {
+                result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
+            }
+        });
+
+        var rootCommand = new RootCommand("C# Class Context Analyzer - Find all dependencies and references");
+        rootCommand.AddOption(fileOption);
+        rootCommand.AddOption(rootDirOption);
+        rootCommand.AddOption(outputOption);
+        rootCommand.AddOption(formatOption);
+        rootCommand.AddOption(optimizeOption);
+
+        rootCommand.SetHandler(async (file, rootDir, output, format, optimize) =>
+        {
+            try
+            {
+                IClassContextAnalyzer analyzer = optimize
+                    ? new ClassContextAnalyzerWithSourceIndex()
+                    : new ClassContextAnalyzer();
+
+                Console.WriteLine($"Using {(optimize ? "optimized" : "original")} analyzer...");
+                var result = await analyzer.AnalyzeAsync(file.FullName, rootDir.FullName);
+
+                if (format == "markdown")
+                {
+                    var generator = new MarkdownGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
+                else if (format == "csharp-project")
+                {
+                    var generator = new CSharpProjectGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
+
+                Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
+                Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Environment.Exit(1);
+            }
+        }, fileOption, rootDirOption, outputOption, formatOption, optimizeOption);
+
+        return await rootCommand.InvokeAsync(args);
     }
 }

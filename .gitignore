@@ -52,3 +52,10 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Benchmark results (generated bulk output)
+benchmark-results/
+benchmark-results-*/
+
+# OpenCode session files
+.opencode/session-ledger.md
