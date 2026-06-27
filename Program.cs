@@ -26,20 +26,43 @@ class Program
             description: "Root directory to search for dependency files",
             getDefaultValue: () => new DirectoryInfo(Directory.GetCurrentDirectory()));
 
+        var formatOption = new Option<string>(
+            name: "--format",
+            description: "Output format: markdown or csharp-project",
+            getDefaultValue: () => "markdown");
+
+        formatOption.AddValidator(result =>
+        {
+            var format = result.GetValueOrDefault<string>();
+            if (format != "markdown" && format != "csharp-project")
+            {
+                result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
+            }
+        });
+
         var rootCommand = new RootCommand("C# Class Context Analyzer - Find all dependencies and references");
         rootCommand.AddOption(fileOption);
         rootCommand.AddOption(rootDirOption);
         rootCommand.AddOption(outputOption);
+        rootCommand.AddOption(formatOption);
 
-        rootCommand.SetHandler(async (file, rootDir, output) =>
+        rootCommand.SetHandler(async (file, rootDir, output, format) =>
         {
             try
             {
                 var analyzer = new ClassContextAnalyzer();
                 var result = await analyzer.AnalyzeAsync(file.FullName, rootDir.FullName);
                 
-                var generator = new MarkdownGenerator();
-                await generator.GenerateAsync(result, output.FullName);
+                if (format == "markdown")
+                {
+                    var generator = new MarkdownGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
+                else if (format == "csharp-project")
+                {
+                    var generator = new CSharpProjectGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
                 
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
                 Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
@@ -49,7 +72,7 @@ class Program
                 Console.Error.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, fileOption, rootDirOption, outputOption);
+        }, fileOption, rootDirOption, outputOption, formatOption);
 
         return await rootCommand.InvokeAsync(args);
     }
@@ -253,6 +276,55 @@ public class MarkdownGenerator : IMarkdownGenerator
             await writer.WriteLineAsync();
             await writer.WriteLineAsync();
         }
+    }
+}
+
+#endregion
+
+#region C# Project Generator
+
+public interface IProjectGenerator
+{
+    Task GenerateAsync(ClassContextAnalysisResult result, string outputPath);
+}
+
+public class CSharpProjectGenerator : IProjectGenerator
+{
+    public async Task GenerateAsync(ClassContextAnalysisResult result, string outputPath)
+    {
+        // Create output directory if it doesn't exist
+        var outputDir = new DirectoryInfo(outputPath);
+        if (!outputDir.Exists)
+        {
+            outputDir.Create();
+        }
+        
+        // Write all .cs files
+        foreach (var kvp in result.SourceFiles)
+        {
+            var originalFileName = Path.GetFileName(kvp.Key);
+            var outputFilePath = Path.Combine(outputPath, originalFileName);
+            await File.WriteAllTextAsync(outputFilePath, kvp.Value.Content);
+        }
+        
+        // Generate and write .csproj file
+        var csprojContent = GenerateCsprojContent();
+        var csprojPath = Path.Combine(outputPath, "ExtractedClasses.csproj");
+        await File.WriteAllTextAsync(csprojPath, csprojContent);
+    }
+    
+    private string GenerateCsprojContent()
+    {
+        return @"<Project Sdk=""Microsoft.NET.Sdk"">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>";
     }
 }
 
