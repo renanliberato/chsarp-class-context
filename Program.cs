@@ -559,23 +559,111 @@ public class CSharpProjectGenerator : IProjectGenerator
         }
 
         // Generate and write .csproj file
-        var csprojContent = GenerateCsprojContent();
+        var csprojContent = GenerateCsprojContent(result);
         var csprojPath = Path.Combine(outputPath, "ExtractedClasses.csproj");
         await File.WriteAllTextAsync(csprojPath, csprojContent);
     }
 
-    private string GenerateCsprojContent()
+    private string GenerateCsprojContent(ClassContextAnalysisResult result)
     {
-        return @"<Project Sdk=""Microsoft.NET.Sdk"">
-
-  <PropertyGroup>
-    <OutputType>Library</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-  </PropertyGroup>
-
-</Project>";
+        var sb = new System.Text.StringBuilder();
+        
+        sb.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">");
+        sb.AppendLine();
+        sb.AppendLine("  <PropertyGroup>");
+        
+        // Use TargetFramework from metadata or default to net9.0
+        var targetFramework = "net9.0";
+        if (result.ProjectMetadata != null && !string.IsNullOrEmpty(result.ProjectMetadata.TargetFramework))
+        {
+            targetFramework = result.ProjectMetadata.TargetFramework;
+        }
+        sb.AppendLine($"    <TargetFramework>{targetFramework}</TargetFramework>");
+        
+        // Add other properties from metadata if available
+        if (result.ProjectMetadata != null)
+        {
+            if (!string.IsNullOrEmpty(result.ProjectMetadata.Nullable))
+            {
+                sb.AppendLine($"    <Nullable>{result.ProjectMetadata.Nullable}</Nullable>");
+            }
+            else
+            {
+                sb.AppendLine("    <Nullable>enable</Nullable>");
+            }
+            
+            if (!string.IsNullOrEmpty(result.ProjectMetadata.ImplicitUsings))
+            {
+                sb.AppendLine($"    <ImplicitUsings>{result.ProjectMetadata.ImplicitUsings}</ImplicitUsings>");
+            }
+            else
+            {
+                sb.AppendLine("    <ImplicitUsings>enable</ImplicitUsings>");
+            }
+            
+            if (!string.IsNullOrEmpty(result.ProjectMetadata.LangVersion))
+            {
+                sb.AppendLine($"    <LangVersion>{result.ProjectMetadata.LangVersion}</LangVersion>");
+            }
+        }
+        else
+        {
+            sb.AppendLine("    <ImplicitUsings>enable</ImplicitUsings>");
+            sb.AppendLine("    <Nullable>enable</Nullable>");
+        }
+        
+        // Disable default compile items to use explicit compile includes
+        sb.AppendLine("    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>");
+        sb.AppendLine("  </PropertyGroup>");
+        sb.AppendLine();
+        
+        // Add PackageReferences if available
+        if (result.ProjectMetadata != null && result.ProjectMetadata.PackageReferences.Count > 0)
+        {
+            sb.AppendLine("  <ItemGroup>");
+            foreach (var packageRef in result.ProjectMetadata.PackageReferences)
+            {
+                if (!string.IsNullOrEmpty(packageRef.Version))
+                {
+                    sb.AppendLine($"    <PackageReference Include=\"{packageRef.Include}\" Version=\"{packageRef.Version}\" />");
+                }
+                else
+                {
+                    sb.AppendLine($"    <PackageReference Include=\"{packageRef.Include}\" />");
+                }
+            }
+            sb.AppendLine("  </ItemGroup>");
+            sb.AppendLine();
+        }
+        
+        // Add FrameworkReferences if available
+        if (result.ProjectMetadata != null && result.ProjectMetadata.FrameworkReferences.Count > 0)
+        {
+            sb.AppendLine("  <ItemGroup>");
+            foreach (var frameworkRef in result.ProjectMetadata.FrameworkReferences)
+            {
+                sb.AppendLine($"    <FrameworkReference Include=\"{frameworkRef.Include}\" />");
+            }
+            sb.AppendLine("  </ItemGroup>");
+            sb.AppendLine();
+        }
+        
+        // Add explicit Compile items for each extracted file
+        if (result.SourceFiles.Count > 0)
+        {
+            sb.AppendLine("  <ItemGroup>");
+            foreach (var sourceFile in result.SourceFiles.Keys)
+            {
+                var fileName = Path.GetFileName(sourceFile);
+                sb.AppendLine($"    <Compile Include=\"{fileName}\" />");
+            }
+            sb.AppendLine("  </ItemGroup>");
+            sb.AppendLine();
+        }
+        
+        sb.AppendLine("</Project>");
+        
+        return sb.ToString();
     }
 }
 
