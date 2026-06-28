@@ -102,6 +102,30 @@ public class OrderList
 4. **Smart Filtering** - Excludes built-in types and C# keywords
 5. **Markdown Generation** - Creates comprehensive documentation with all related files
 
+## 🔍 Linting
+
+This project uses [CovenantCheck](https://github.com/renanliberato/CovenantCheck) for code quality linting. CovenantCheck is a C# linter that enforces best practices and helps maintain code quality.
+
+### Running the Linter Locally
+
+To run the linter locally:
+
+```bash
+./lint.sh
+```
+
+This script will:
+- Exclude generated files (`bin/`, `obj/`, `.robot/`)
+- Report any code quality issues
+- Exit with code 1 if issues are found, 0 if clean
+
+### What CovenantCheck Checks
+
+- **CC-NUMBERS-SIZE-001**: Functions should not exceed 50 lines
+- **CC-NUMBERS-SIZE-002**: Lines should not exceed 120 characters
+- **CC-SAFETY-CTRL-002**: Boolean conditions should not be overly complex (>1 logical operator)
+- **CC-SAFETY-INIT-001**: Object initializers should not assign null
+
 ## 📈 Use Cases
 
 - **Code Reviews** - Get complete context for any class

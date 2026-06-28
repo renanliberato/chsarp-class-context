@@ -162,14 +162,24 @@ public class UnsupportedExtractionCasesTests
 
         // Assert - Should detect unsafe conditional metadata and produce error diagnostic
         Assert.NotNull(metadata);
-        var conditionalDiags = metadata.Diagnostics
-            .Where(d => d.Severity == DiagnosticSeverity.Error &&
-                       (d.Message.Contains("conditional", StringComparison.OrdinalIgnoreCase) ||
-                        d.Message.Contains("BuildConfiguration", StringComparison.OrdinalIgnoreCase) ||
-                        d.Message.Contains("RuntimeIdentifier", StringComparison.OrdinalIgnoreCase)))
+        var errorDiags = metadata.Diagnostics
+            .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
+        var conditionalDiags = errorDiags
+            .Where(d => d.Message.Contains("conditional", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var hasConditional = conditionalDiags.Any() ||
+            errorDiags.Any(d => d.Message.Contains("BuildConfiguration", StringComparison.OrdinalIgnoreCase)) ||
+            errorDiags.Any(d => d.Message.Contains("RuntimeIdentifier", StringComparison.OrdinalIgnoreCase));
+        var allConditionalDiags = hasConditional
+            ? errorDiags.Where(d =>
+                d.Message.Contains("conditional", StringComparison.OrdinalIgnoreCase) ||
+                d.Message.Contains("BuildConfiguration", StringComparison.OrdinalIgnoreCase) ||
+                d.Message.Contains("RuntimeIdentifier", StringComparison.OrdinalIgnoreCase))
+            : conditionalDiags;
+        var finalDiags = allConditionalDiags.ToList();
 
-        Assert.NotEmpty(conditionalDiags);
+        Assert.NotEmpty(finalDiags);
 
         // Cleanup
         Directory.Delete(tempDir, true);

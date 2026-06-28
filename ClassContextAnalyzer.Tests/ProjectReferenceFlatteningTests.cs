@@ -77,20 +77,26 @@ namespace TestProject
 
                 // Assert
                 Assert.NotNull(result);
-                Assert.True(result.SourceFiles.Count >= 2, $"Expected at least 2 files, got {result.SourceFiles.Count}");
+                Assert.True(
+                    result.SourceFiles.Count >= 2,
+                    $"Expected at least 2 files, got {result.SourceFiles.Count}");
 
                 // Should include the test file
                 Assert.True(result.SourceFiles.ContainsKey(testCsFile), "Test file should be included");
 
                 // Should include the source file from referenced project
-                var sourceFileIncluded = result.SourceFiles.Keys.Any(f => f.EndsWith("UtilityClass.cs"));
-                Assert.True(sourceFileIncluded, "Source file from referenced project should be included");
+                var sourceFileIncluded = result.SourceFiles.Keys.Any(f =>
+                    f.EndsWith("UtilityClass.cs"));
+                Assert.True(sourceFileIncluded, "Should include source from ProjectReference");
 
-                // Should have diagnostics explaining the flattening
+                // Check for diagnostics explaining the flattening
                 var flatteningDiagnostics = result.Diagnostics
-                    .Where(d => d.Message.Contains("ProjectReference") || d.Message.Contains("flattened"))
+                    .Where(d => d.Message.Contains("ProjectReference") ||
+                        d.Message.Contains("flattened"))
                     .ToList();
-                Assert.True(flatteningDiagnostics.Count > 0, "Should have diagnostics explaining ProjectReference flattening");
+                Assert.True(
+                    flatteningDiagnostics.Count > 0,
+                    "Should have diagnostics explaining ProjectReference flattening");
             }
             finally
             {

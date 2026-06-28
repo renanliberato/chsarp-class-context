@@ -45,9 +45,10 @@ class AnalyzerProgram
         formatOption.AddValidator(result =>
         {
             var format = result.GetValueOrDefault<string>();
-            if (format != "markdown" && format != "csharp-project" && format != "json")
+            var validFormats = new[] { "markdown", "csharp-project", "json" };
+            if (!validFormats.Contains(format))
             {
-                result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
+                result.ErrorMessage = "Format must be 'markdown', 'csharp-project', or 'json'";
             }
         });
 
@@ -85,7 +86,9 @@ class AnalyzerProgram
                     await generator.GenerateAsync(result, output.FullName);
                 }
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
-                Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
+                var fileCount = result.SourceFiles.Count;
+                var typeCount = result.TypeReferences.Count;
+                Console.WriteLine($"Analyzed {fileCount} files with {typeCount} type references");
             }
             catch (Exception ex)
             {
@@ -192,8 +195,9 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
                 _diagnostics.AddRange(errorDiagnostics);
 
                 // Throw explicit exception for unsupported extraction cases
+                var errorMessages = string.Join("; ", errorDiagnostics.Select(d => d.Message));
                 throw new InvalidOperationException(
-                    $"Cannot safely extract project due to unsupported features: {string.Join("; ", errorDiagnostics.Select(d => d.Message))}");
+                    $"Cannot safely extract project due to unsupported features: {errorMessages}");
             }
         }
 
@@ -202,11 +206,12 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         
         if (projectMetadata != null && projectMetadata.ProjectReferences.Count > 0)
         {
+            var projectRefCount = projectMetadata.ProjectReferences.Count;
             _diagnostics.Add(new AnalysisDiagnostic
             {
                 FilePath = csprojPath ?? filePath,
                 Severity = DiagnosticSeverity.Info,
-                Message = $"Found {projectMetadata.ProjectReferences.Count} ProjectReference(s), will flatten types from referenced projects"
+                Message = $"Found {projectRefCount} ProjectReference(s), will flatten types from referenced projects"
             });
 
             // Resolve ProjectReference paths and add them to search
@@ -249,19 +254,23 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
                     Content = kvp.Value,
                     LastModified = File.GetLastWriteTime(kvp.Key),
                     DefinedTypes = ExtractDefinedTypes(kvp.Value),
-                    Reason = _filesFromProjectReferences.Contains(kvp.Key) 
-                        ? "flattened_project_reference" 
+                    Reason = _filesFromProjectReferences.Contains(kvp.Key)
+                        ? "flattened_project_reference"
                         : "extracted_class_dependency"
                 }
             ),
             TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
-            DependencyRelationships = new Dictionary<string, HashSet<string>>(_dependencyRelationships),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(
+                _dependencyRelationships),
             Diagnostics = new List<AnalysisDiagnostic>(_diagnostics),
             ProjectMetadata = projectMetadata
         };
     }
 
-    private async Task AnalyzeFileRecursive(string filePath, string rootDirectory, List<string>? directoriesToSearch = null)
+    private async Task AnalyzeFileRecursive(
+        string filePath,
+        string rootDirectory,
+        List<string>? directoriesToSearch = null)
     {
         if (_processedFiles.Contains(filePath))
             return;
@@ -294,7 +303,10 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         }
     }
 
-    private async Task FindAndAnalyzeTypeDefinition(string typeName, string searchDirectory, List<string>? directoriesToSearch = null)
+    private async Task FindAndAnalyzeTypeDefinition(
+        string typeName,
+        string searchDirectory,
+        List<string>? directoriesToSearch = null)
     {
         // Use provided directories or default to just searchDirectory
         var searchDirs = directoriesToSearch ?? new List<string> { searchDirectory };
@@ -325,8 +337,10 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
                     {
                         // Check if this file is from a ProjectReference (different directory)
                         var fileDir = Path.GetDirectoryName(candidateFile);
-                        var isFromProjectReference = !string.IsNullOrEmpty(fileDir) && 
-                                                      !Path.GetFullPath(fileDir).StartsWith(Path.GetFullPath(searchDirectory), StringComparison.OrdinalIgnoreCase);
+                        var isFromProjectReference = !string.IsNullOrEmpty(fileDir) &&
+                            !Path.GetFullPath(fileDir).StartsWith(
+                                Path.GetFullPath(searchDirectory),
+                                StringComparison.OrdinalIgnoreCase);
 
                         if (isFromProjectReference)
                         {
@@ -641,14 +655,18 @@ public class CSharpProjectGenerator : IProjectGenerator
         sb.AppendLine();
         
         // Add PackageReferences if available
-        if (result.ProjectMetadata != null && result.ProjectMetadata.PackageReferences.Count > 0)
+        var hasPackageRefs = result.ProjectMetadata != null &&
+            result.ProjectMetadata.PackageReferences.Count > 0;
+        if (hasPackageRefs)
         {
             sb.AppendLine("  <ItemGroup>");
             foreach (var packageRef in result.ProjectMetadata.PackageReferences)
             {
                 if (!string.IsNullOrEmpty(packageRef.Version))
                 {
-                    sb.AppendLine($"    <PackageReference Include=\"{packageRef.Include}\" Version=\"{packageRef.Version}\" />");
+                    var include = packageRef.Include;
+                    var version = packageRef.Version;
+                    sb.AppendLine($"    <PackageReference Include=\"{include}\" Version=\"{version}\" />");
                 }
                 else
                 {
@@ -851,21 +869,25 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
             // Detect unsupported extraction cases
             DetectUnsupportedExtractionCases(csprojPath, doc, namespaceManager, metadata);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             // If parsing fails, return what we have so far
             metadata.Diagnostics.Add(new AnalysisDiagnostic
             {
                 FilePath = csprojPath,
                 Severity = DiagnosticSeverity.Warning,
-                Message = $"Failed to parse project file: {ex.Message}"
+                Message = $"Failed to parse project file"
             });
         }
 
         return metadata;
     }
 
-    private void DetectUnsupportedExtractionCases(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    private void DetectUnsupportedExtractionCases(
+        string csprojPath,
+        System.Xml.XmlDocument doc,
+        System.Xml.XmlNamespaceManager namespaceManager,
+        ProjectMetadata metadata)
     {
         // Detect source generators (ProjectReferences with OutputItemType="Analyzer" and ReferenceOutputAssembly="false")
         DetectSourceGenerators(csprojPath, doc, namespaceManager, metadata);
@@ -880,7 +902,11 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
         DetectUnsafeConditionalMetadata(csprojPath, doc, namespaceManager, metadata);
     }
 
-    private void DetectSourceGenerators(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    private void DetectSourceGenerators(
+        string csprojPath,
+        System.Xml.XmlDocument doc,
+        System.Xml.XmlNamespaceManager namespaceManager,
+        ProjectMetadata metadata)
     {
         var projectReferences = doc.SelectNodes("//ProjectReference") ??
                                   doc.SelectNodes("//ms:ProjectReference", namespaceManager);
@@ -894,23 +920,31 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
                 var include = projectRef.Attributes?.GetNamedItem("Include")?.Value;
 
                 // Source generators have OutputItemType="Analyzer" and ReferenceOutputAssembly="false"
-                if (!string.IsNullOrEmpty(outputItemType) &&
-                    outputItemType.Equals("Analyzer", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrEmpty(referenceOutputAssembly) &&
-                    referenceOutputAssembly.Equals("false", StringComparison.OrdinalIgnoreCase))
+                var isAnalyzer = !string.IsNullOrEmpty(outputItemType) &&
+                    outputItemType.Equals("Analyzer", StringComparison.OrdinalIgnoreCase);
+                var noReferenceOutput = !string.IsNullOrEmpty(referenceOutputAssembly) &&
+                    referenceOutputAssembly.Equals("false", StringComparison.OrdinalIgnoreCase);
+                if (isAnalyzer && noReferenceOutput)
                 {
                     metadata.Diagnostics.Add(new AnalysisDiagnostic
                     {
                         FilePath = csprojPath,
                         Severity = DiagnosticSeverity.Error,
-                        Message = $"Source generator detected: {include}. Source generators generate code at compile time and cannot be safely extracted. The extracted bundle will be incomplete and may not compile correctly."
+                        Message = $"Source generator detected: {include}. " +
+                            "Source generators generate code at compile time and " +
+                            "cannot be safely extracted. The extracted bundle " +
+                            "will be incomplete and may not compile correctly."
                     });
                 }
             }
         }
     }
 
-    private void DetectCustomMsBuildTargets(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    private void DetectCustomMsBuildTargets(
+        string csprojPath,
+        System.Xml.XmlDocument doc,
+        System.Xml.XmlNamespaceManager namespaceManager,
+        ProjectMetadata metadata)
     {
         // Detect custom Import elements
         var imports = doc.SelectNodes("//Import") ??
@@ -978,16 +1012,23 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
 
         foreach (var packageRef in metadata.PackageReferences)
         {
-            if (analyzerPackagePatterns.Any(pattern =>
-                packageRef.Include.Equals(pattern, StringComparison.OrdinalIgnoreCase) ||
-                packageRef.Include.Contains("Analyzer", StringComparison.OrdinalIgnoreCase) ||
-                packageRef.Include.Contains("Analyzers", StringComparison.OrdinalIgnoreCase)))
+            var isAnalyzerPackage = analyzerPackagePatterns.Any(pattern =>
+                packageRef.Include.Equals(pattern, StringComparison.OrdinalIgnoreCase));
+            var containsAnalyzer = packageRef.Include.Contains(
+                    "Analyzer", StringComparison.OrdinalIgnoreCase) ||
+                packageRef.Include.Contains(
+                    "Analyzers", StringComparison.OrdinalIgnoreCase);
+            if (isAnalyzerPackage || containsAnalyzer)
             {
                 metadata.Diagnostics.Add(new AnalysisDiagnostic
                 {
                     FilePath = csprojPath,
                     Severity = DiagnosticSeverity.Error,
-                    Message = $"Analyzer package detected: {packageRef.Include}. Analyzer packages can provide diagnostics and code fixes that affect compilation behavior. While the bundle may compile, it may have different behavior than the original project."
+                    Message = $"Analyzer package detected: {packageRef.Include}. " +
+                        "Analyzer packages can provide diagnostics and code " +
+                        "fixes that affect compilation behavior. While the " +
+                        "bundle may compile, it may have different " +
+                        "behavior than the original project."
                 });
             }
         }
@@ -1211,8 +1252,12 @@ public class TypeReferenceWalker : CSharpSyntaxWalker
         var identifier = node.Identifier.ValueText;
 
         // Heuristic: capitalize first letter suggests it might be a type
-        if (!string.IsNullOrEmpty(identifier) && char.IsUpper(identifier[0]) &&
-            !IsKeyword(identifier) && !IsBuiltInType(identifier))
+        var isPotentialType = !string.IsNullOrEmpty(identifier) &&
+            char.IsUpper(identifier[0]);
+        var isNotKeyword = !IsKeyword(identifier);
+        var isNotBuiltIn = !IsBuiltInType(identifier);
+        var isValidType = isPotentialType && isNotKeyword;
+        if (isValidType && isNotBuiltIn)
         {
             ReferencedTypes.Add(identifier);
         }
@@ -1396,9 +1441,10 @@ public static class AnalyzerLauncher
         formatOption.AddValidator(result =>
         {
             var format = result.GetValueOrDefault<string>();
-            if (format != "markdown" && format != "csharp-project" && format != "json")
+            var validFormats = new[] { "markdown", "csharp-project", "json" };
+            if (!validFormats.Contains(format))
             {
-                result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
+                result.ErrorMessage = "Format must be 'markdown', 'csharp-project', or 'json'";
             }
         });
 
@@ -1437,7 +1483,9 @@ public static class AnalyzerLauncher
                 }
 
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
-                Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
+                var fileCount = result.SourceFiles.Count;
+                var typeCount = result.TypeReferences.Count;
+                Console.WriteLine($"Analyzed {fileCount} files with {typeCount} type references");
             }
             catch (Exception ex)
             {

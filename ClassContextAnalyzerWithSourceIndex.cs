@@ -59,8 +59,11 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
                 _diagnostics.AddRange(errorDiagnostics);
 
                 // Throw explicit exception for unsupported extraction cases
+                var errorMessages = string.Join(
+                    "; ",
+                    errorDiagnostics.Select(d => d.Message));
                 throw new InvalidOperationException(
-                    $"Cannot safely extract project due to unsupported features: {string.Join("; ", errorDiagnostics.Select(d => d.Message))}");
+                    $"Cannot safely extract project due to unsupported features: {errorMessages}");
             }
         }
 
@@ -69,11 +72,12 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
         
         if (projectMetadata != null && projectMetadata.ProjectReferences.Count > 0)
         {
+            var projectRefCount = projectMetadata.ProjectReferences.Count;
             _diagnostics.Add(new AnalysisDiagnostic
             {
                 FilePath = csprojPath ?? filePath,
                 Severity = DiagnosticSeverity.Info,
-                Message = $"Found {projectMetadata.ProjectReferences.Count} ProjectReference(s), will flatten types from referenced projects"
+                Message = $"Found {projectRefCount} ProjectReference(s), will flatten types from referenced projects"
             });
 
             // Resolve ProjectReference paths and add them to index
@@ -186,11 +190,15 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
         _indexBuilt = true;
         stopwatch.Stop();
 
+        var typeCount = _typeToFilesIndex.Count;
+        var dirCount = rootDirectories.Count;
         _diagnostics.Add(new AnalysisDiagnostic
         {
             FilePath = rootDirectories[0],
             Severity = DiagnosticSeverity.Info,
-            Message = $"Source index built: {_typeToFilesIndex.Count} types indexed from {totalFiles} files in {stopwatch.ElapsedMilliseconds}ms across {rootDirectories.Count} directories"
+            Message = $"Source index built: {typeCount} types indexed " +
+                $"from {totalFiles} files in {stopwatch.ElapsedMilliseconds}ms " +
+                $"across {dirCount} directories"
         });
     }
 
@@ -272,8 +280,10 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
                 {
                     // Check if this file is from a ProjectReference (different directory)
                     var fileDir = Path.GetDirectoryName(filePath);
-                    var isFromProjectReference = !string.IsNullOrEmpty(fileDir) && 
-                                                  !Path.GetFullPath(fileDir).StartsWith(Path.GetFullPath(rootDirectory), StringComparison.OrdinalIgnoreCase);
+                    var isFromProjectReference = !string.IsNullOrEmpty(fileDir) &&
+                        !Path.GetFullPath(fileDir).StartsWith(
+                            Path.GetFullPath(rootDirectory),
+                            StringComparison.OrdinalIgnoreCase);
 
                     if (isFromProjectReference)
                     {

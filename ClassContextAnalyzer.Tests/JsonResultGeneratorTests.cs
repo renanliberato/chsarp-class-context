@@ -453,7 +453,8 @@ public class JsonResultGeneratorTests
                 {
                     FilePath = "/path/to/referenced/UtilityClass.cs",
                     Severity = DiagnosticSeverity.Info,
-                    Message = "Including file from ProjectReference: UtilityClass defined in /path/to/referenced/UtilityClass.cs"
+                    Message = "Including file from ProjectReference: " +
+                        "UtilityClass defined in /path/to/referenced/UtilityClass.cs"
                 }
             },
             ProjectMetadata = null
