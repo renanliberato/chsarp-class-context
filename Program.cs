@@ -8,6 +8,11 @@ namespace ClassContextAnalyzer;
 
 class AnalyzerProgram
 {
+    static async Task<int> Main(string[] args)
+    {
+        return await AnalyzerMain(args);
+    }
+
     static async Task<int> AnalyzerMain(string[] args)
     {
         var fileOption = new Option<FileInfo>(

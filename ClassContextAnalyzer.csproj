@@ -16,6 +16,8 @@
 
   <ItemGroup>
     <Compile Remove="ClassContextAnalyzer.Tests/**/*.cs" />
+    <Compile Remove="BenchmarkProgram.cs" />
+    <Compile Remove="UnityFixture/**/*.cs" />
     <EmbeddedResource Remove="ClassContextAnalyzer.Tests/**/*" />
     <None Remove="ClassContextAnalyzer.Tests/**/*" />
   </ItemGroup>
