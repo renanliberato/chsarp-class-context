@@ -360,4 +360,128 @@ public class JsonResultGeneratorTests
             Console.WriteLine("Project metadata not found (acceptable in test environment)");
         }
     }
+
+    [Fact]
+    public async Task GenerateAsync_ShouldIncludeProjectReferencesInMetadata()
+    {
+        // Arrange
+        var sourcePath = "/path/to/source/TestClass.cs";
+        var projectMetadata = new ProjectMetadata
+        {
+            ProjectPath = "/path/to/source/TestClass.csproj",
+            TargetFramework = "net9.0",
+            ProjectReferences = new List<ProjectReference>
+            {
+                new() { Include = "..\\..\\MyLibrary\\MyLibrary.csproj" },
+                new() { Include = "..\\SharedUtils\\SharedUtils.csproj" }
+            }
+        };
+
+        var result = new ClassContextAnalysisResult
+        {
+            SourceFiles = new Dictionary<string, SourceFileInfo>
+            {
+                [sourcePath] = new SourceFileInfo
+                {
+                    FilePath = sourcePath,
+                    Content = "public class TestClass { }",
+                    LastModified = DateTime.Now,
+                    DefinedTypes = new HashSet<string> { "TestClass" }
+                }
+            },
+            TypeReferences = new Dictionary<string, HashSet<string>>(),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(),
+            Diagnostics = new List<AnalysisDiagnostic>(),
+            ProjectMetadata = projectMetadata
+        };
+
+        var generator = new JsonResultGenerator();
+        var outputPath = Path.Combine(Path.GetTempPath(), "test-project-refs-output.json");
+
+        // Act
+        await generator.GenerateAsync(result, outputPath);
+
+        // Assert
+        var jsonContent = await File.ReadAllTextAsync(outputPath);
+        using var jsonDoc = JsonDocument.Parse(jsonContent);
+        var root = jsonDoc.RootElement;
+
+        Assert.True(root.TryGetProperty("project", out var project));
+        Assert.True(project.TryGetProperty("projectReferences", out var projectRefs));
+        Assert.Equal(2, projectRefs.GetArrayLength());
+
+        var firstRef = projectRefs[0];
+        Assert.True(firstRef.TryGetProperty("include", out var firstInclude));
+        Assert.Contains("MyLibrary.csproj", firstInclude.GetString());
+
+        var secondRef = projectRefs[1];
+        Assert.True(secondRef.TryGetProperty("include", out var secondInclude));
+        Assert.Contains("SharedUtils.csproj", secondInclude.GetString());
+
+        // Cleanup
+        File.Delete(outputPath);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ShouldIncludeDiagnosticsAboutProjectReferenceFlattening()
+    {
+        // Arrange
+        var sourcePath = "/path/to/source/TestClass.cs";
+        var result = new ClassContextAnalysisResult
+        {
+            SourceFiles = new Dictionary<string, SourceFileInfo>
+            {
+                [sourcePath] = new SourceFileInfo
+                {
+                    FilePath = sourcePath,
+                    Content = "public class TestClass { }",
+                    LastModified = DateTime.Now,
+                    DefinedTypes = new HashSet<string> { "TestClass" }
+                }
+            },
+            TypeReferences = new Dictionary<string, HashSet<string>>(),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(),
+            Diagnostics = new List<AnalysisDiagnostic>
+            {
+                new()
+                {
+                    FilePath = sourcePath,
+                    Severity = DiagnosticSeverity.Info,
+                    Message = "Found 1 ProjectReference(s), will flatten types from referenced projects"
+                },
+                new()
+                {
+                    FilePath = "/path/to/referenced/UtilityClass.cs",
+                    Severity = DiagnosticSeverity.Info,
+                    Message = "Including file from ProjectReference: UtilityClass defined in /path/to/referenced/UtilityClass.cs"
+                }
+            },
+            ProjectMetadata = null
+        };
+
+        var generator = new JsonResultGenerator();
+        var outputPath = Path.Combine(Path.GetTempPath(), "test-flattening-diagnostics.json");
+
+        // Act
+        await generator.GenerateAsync(result, outputPath);
+
+        // Assert
+        var jsonContent = await File.ReadAllTextAsync(outputPath);
+        using var jsonDoc = JsonDocument.Parse(jsonContent);
+        var root = jsonDoc.RootElement;
+
+        Assert.True(root.TryGetProperty("diagnostics", out var diagnostics));
+        Assert.Equal(2, diagnostics.GetArrayLength());
+
+        var firstDiag = diagnostics[0];
+        Assert.Equal("Info", firstDiag.GetProperty("severity").GetString());
+        Assert.Contains("ProjectReference", firstDiag.GetProperty("message").GetString());
+
+        var secondDiag = diagnostics[1];
+        Assert.Equal("Info", secondDiag.GetProperty("severity").GetString());
+        Assert.Contains("Including file from ProjectReference", secondDiag.GetProperty("message").GetString());
+
+        // Cleanup
+        File.Delete(outputPath);
+    }
 }

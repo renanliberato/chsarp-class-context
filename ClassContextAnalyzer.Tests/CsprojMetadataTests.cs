@@ -185,4 +185,56 @@ public class CsprojMetadataTests
         // Assert
         Assert.Null(result);
     }
+
+    [Fact]
+    public void ExtractMetadata_ShouldExtractProjectReferences()
+    {
+        // Arrange - create a csproj with ProjectReferences
+        var tempCsproj = Path.Combine(Path.GetTempPath(), "with-project-refs.csproj");
+        File.WriteAllText(tempCsproj, @"
+<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include=""..\..\MyLibrary\MyLibrary.csproj"" />
+    <ProjectReference Include=""..\SharedUtils\SharedUtils.csproj"" />
+  </ItemGroup>
+</Project>");
+
+        // Act
+        var result = _extractor.ExtractMetadata(tempCsproj);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ProjectReferences.Count);
+        Assert.Contains(result.ProjectReferences, pr => pr.Include.EndsWith("MyLibrary.csproj"));
+        Assert.Contains(result.ProjectReferences, pr => pr.Include.EndsWith("SharedUtils.csproj"));
+
+        // Cleanup
+        File.Delete(tempCsproj);
+    }
+
+    [Fact]
+    public void ExtractMetadata_ShouldHandleMissingProjectReferences()
+    {
+        // Arrange - create a csproj without ProjectReferences
+        var tempCsproj = Path.Combine(Path.GetTempPath(), "no-project-refs.csproj");
+        File.WriteAllText(tempCsproj, @"
+<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>");
+
+        // Act
+        var result = _extractor.ExtractMetadata(tempCsproj);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Empty(result.ProjectReferences);
+
+        // Cleanup
+        File.Delete(tempCsproj);
+    }
 }

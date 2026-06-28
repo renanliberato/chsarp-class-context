@@ -16,6 +16,9 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
     // Source index: maps type names to their file paths
     private readonly Dictionary<string, List<string>> _typeToFilesIndex = new();
     private bool _indexBuilt = false;
+    
+    // Track files from ProjectReferences to set appropriate reason
+    private readonly HashSet<string> _filesFromProjectReferences = new();
 
     public ClassContextAnalyzerWithSourceIndex() : this(new ProjectMetadataExtractor())
     {
@@ -43,8 +46,46 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
         var csprojPath = _metadataExtractor.FindProjectFile(filePath);
         var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
-        // Build the source index first (single pass through all files)
-        BuildSourceIndex(rootDirectory);
+        // Collect all directories to index (including ProjectReferences)
+        var directoriesToIndex = new List<string> { rootDirectory };
+        
+        if (projectMetadata != null && projectMetadata.ProjectReferences.Count > 0)
+        {
+            _diagnostics.Add(new AnalysisDiagnostic
+            {
+                FilePath = csprojPath ?? filePath,
+                Severity = DiagnosticSeverity.Info,
+                Message = $"Found {projectMetadata.ProjectReferences.Count} ProjectReference(s), will flatten types from referenced projects"
+            });
+
+            // Resolve ProjectReference paths and add them to index
+            foreach (var projectRef in projectMetadata.ProjectReferences)
+            {
+                var resolvedPath = ResolveProjectReferencePath(projectRef.Include, csprojPath ?? filePath);
+                if (resolvedPath != null && Directory.Exists(resolvedPath))
+                {
+                    directoriesToIndex.Add(resolvedPath);
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath ?? filePath,
+                        Severity = DiagnosticSeverity.Info,
+                        Message = $"Adding ProjectReference directory to source index: {resolvedPath}"
+                    });
+                }
+                else
+                {
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath ?? filePath,
+                        Severity = DiagnosticSeverity.Warning,
+                        Message = $"Could not resolve ProjectReference path: {projectRef.Include}"
+                    });
+                }
+            }
+        }
+
+        // Build the source index first (single pass through all directories)
+        BuildSourceIndex(directoriesToIndex);
 
         // Start with initial file
         await AnalyzeFileRecursive(filePath, rootDirectory);
@@ -59,7 +100,10 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
                     FilePath = kvp.Key,
                     Content = kvp.Value,
                     LastModified = File.GetLastWriteTime(kvp.Key),
-                    DefinedTypes = ExtractDefinedTypes(kvp.Value)
+                    DefinedTypes = ExtractDefinedTypes(kvp.Value),
+                    Reason = _filesFromProjectReferences.Contains(kvp.Key) 
+                        ? "flattened_project_reference" 
+                        : "extracted_class_dependency"
                 }
             ),
             TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
@@ -69,46 +113,55 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
         };
     }
 
-    private void BuildSourceIndex(string rootDirectory)
+    private void BuildSourceIndex(List<string> rootDirectories)
     {
         if (_indexBuilt)
             return;
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var totalFiles = 0;
 
-        // Get all .cs files once
-        var allFiles = Directory.GetFiles(rootDirectory, "*.cs", SearchOption.AllDirectories);
-
-        foreach (var file in allFiles)
+        // Index files from all directories
+        foreach (var rootDirectory in rootDirectories)
         {
-            try
+            if (!Directory.Exists(rootDirectory))
+                continue;
+
+            // Get all .cs files once
+            var allFiles = Directory.GetFiles(rootDirectory, "*.cs", SearchOption.AllDirectories);
+
+            foreach (var file in allFiles)
             {
-                var content = File.ReadAllText(file);
-                var tree = CSharpSyntaxTree.ParseText(content);
-                var root = tree.GetCompilationUnitRoot();
-
-                // Collect all type definitions from this file
-                var typeCollector = new TypeDefinitionCollector();
-                typeCollector.Visit(root);
-
-                // Index each type definition
-                foreach (var typeName in typeCollector.DefinedTypes)
+                try
                 {
-                    if (!_typeToFilesIndex.ContainsKey(typeName))
+                    var content = File.ReadAllText(file);
+                    var tree = CSharpSyntaxTree.ParseText(content);
+                    var root = tree.GetCompilationUnitRoot();
+
+                    // Collect all type definitions from this file
+                    var typeCollector = new TypeDefinitionCollector();
+                    typeCollector.Visit(root);
+
+                    // Index each type definition
+                    foreach (var typeName in typeCollector.DefinedTypes)
                     {
-                        _typeToFilesIndex[typeName] = new List<string>();
+                        if (!_typeToFilesIndex.ContainsKey(typeName))
+                        {
+                            _typeToFilesIndex[typeName] = new List<string>();
+                        }
+                        _typeToFilesIndex[typeName].Add(file);
                     }
-                    _typeToFilesIndex[typeName].Add(file);
+                    totalFiles++;
                 }
-            }
-            catch (Exception ex)
-            {
-                _diagnostics.Add(new AnalysisDiagnostic
+                catch (Exception ex)
                 {
-                    FilePath = file,
-                    Severity = DiagnosticSeverity.Warning,
-                    Message = $"Error indexing file: {ex.Message}"
-                });
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = file,
+                        Severity = DiagnosticSeverity.Warning,
+                        Message = $"Error indexing file: {ex.Message}"
+                    });
+                }
             }
         }
 
@@ -117,10 +170,38 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
 
         _diagnostics.Add(new AnalysisDiagnostic
         {
-            FilePath = rootDirectory,
+            FilePath = rootDirectories[0],
             Severity = DiagnosticSeverity.Info,
-            Message = $"Source index built: {_typeToFilesIndex.Count} types indexed from {allFiles.Length} files in {stopwatch.ElapsedMilliseconds}ms"
+            Message = $"Source index built: {_typeToFilesIndex.Count} types indexed from {totalFiles} files in {stopwatch.ElapsedMilliseconds}ms across {rootDirectories.Count} directories"
         });
+    }
+
+    private string? ResolveProjectReferencePath(string projectReference, string referencingCsprojPath)
+    {
+        try
+        {
+            var referencingDir = Path.GetDirectoryName(referencingCsprojPath);
+            if (string.IsNullOrEmpty(referencingDir))
+                return null;
+
+            // Resolve relative path
+            var resolvedPath = Path.Combine(referencingDir, projectReference);
+            
+            // Normalize the path
+            resolvedPath = Path.GetFullPath(resolvedPath);
+
+            // If it's a .csproj file, get its directory
+            if (resolvedPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedPath = Path.GetDirectoryName(resolvedPath);
+            }
+
+            return resolvedPath;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task AnalyzeFileRecursive(string filePath, string rootDirectory)
@@ -171,6 +252,22 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
                 // Only analyze if not already processed
                 if (!_processedFiles.Contains(filePath))
                 {
+                    // Check if this file is from a ProjectReference (different directory)
+                    var fileDir = Path.GetDirectoryName(filePath);
+                    var isFromProjectReference = !string.IsNullOrEmpty(fileDir) && 
+                                                  !Path.GetFullPath(fileDir).StartsWith(Path.GetFullPath(rootDirectory), StringComparison.OrdinalIgnoreCase);
+
+                    if (isFromProjectReference)
+                    {
+                        _filesFromProjectReferences.Add(filePath);
+                        _diagnostics.Add(new AnalysisDiagnostic
+                        {
+                            FilePath = filePath,
+                            Severity = DiagnosticSeverity.Info,
+                            Message = $"Including file from ProjectReference: {typeName} defined in {filePath}"
+                        });
+                    }
+
                     await AnalyzeFileRecursive(filePath, rootDirectory);
                 }
             }

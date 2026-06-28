@@ -110,6 +110,7 @@ public class SourceFileInfo
     public string Content { get; set; } = string.Empty;
     public DateTime LastModified { get; set; }
     public HashSet<string> DefinedTypes { get; set; } = new();
+    public string Reason { get; set; } = "extracted_class_dependency";
 }
 
 public class AnalysisDiagnostic
@@ -145,6 +146,7 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
     private readonly Dictionary<string, HashSet<string>> _dependencyRelationships = new();
     private readonly List<AnalysisDiagnostic> _diagnostics = new();
     private readonly IProjectMetadataExtractor _metadataExtractor;
+    private readonly HashSet<string> _filesFromProjectReferences = new();
 
     public ClassContextAnalyzer() : this(new ProjectMetadataExtractor())
     {
@@ -172,8 +174,46 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         var csprojPath = _metadataExtractor.FindProjectFile(filePath);
         var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
+        // Collect all directories to search (including ProjectReferences)
+        var directoriesToSearch = new List<string> { rootDirectory };
+        
+        if (projectMetadata != null && projectMetadata.ProjectReferences.Count > 0)
+        {
+            _diagnostics.Add(new AnalysisDiagnostic
+            {
+                FilePath = csprojPath ?? filePath,
+                Severity = DiagnosticSeverity.Info,
+                Message = $"Found {projectMetadata.ProjectReferences.Count} ProjectReference(s), will flatten types from referenced projects"
+            });
+
+            // Resolve ProjectReference paths and add them to search
+            foreach (var projectRef in projectMetadata.ProjectReferences)
+            {
+                var resolvedPath = ResolveProjectReferencePath(projectRef.Include, csprojPath ?? filePath);
+                if (resolvedPath != null && Directory.Exists(resolvedPath))
+                {
+                    directoriesToSearch.Add(resolvedPath);
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath ?? filePath,
+                        Severity = DiagnosticSeverity.Info,
+                        Message = $"Adding ProjectReference directory to search: {resolvedPath}"
+                    });
+                }
+                else
+                {
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath ?? filePath,
+                        Severity = DiagnosticSeverity.Warning,
+                        Message = $"Could not resolve ProjectReference path: {projectRef.Include}"
+                    });
+                }
+            }
+        }
+
         // Start with initial file
-        await AnalyzeFileRecursive(filePath, rootDirectory);
+        await AnalyzeFileRecursive(filePath, rootDirectory, directoriesToSearch);
 
         // Build result
         return new ClassContextAnalysisResult
@@ -185,7 +225,10 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
                     FilePath = kvp.Key,
                     Content = kvp.Value,
                     LastModified = File.GetLastWriteTime(kvp.Key),
-                    DefinedTypes = ExtractDefinedTypes(kvp.Value)
+                    DefinedTypes = ExtractDefinedTypes(kvp.Value),
+                    Reason = _filesFromProjectReferences.Contains(kvp.Key) 
+                        ? "flattened_project_reference" 
+                        : "extracted_class_dependency"
                 }
             ),
             TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
@@ -195,7 +238,7 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         };
     }
 
-    private async Task AnalyzeFileRecursive(string filePath, string rootDirectory)
+    private async Task AnalyzeFileRecursive(string filePath, string rootDirectory, List<string>? directoriesToSearch = null)
     {
         if (_processedFiles.Contains(filePath))
             return;
@@ -224,43 +267,68 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         // For each referenced type, try to find its definition file
         foreach (var typeName in walker.ReferencedTypes)
         {
-            await FindAndAnalyzeTypeDefinition(typeName, rootDirectory);
+            await FindAndAnalyzeTypeDefinition(typeName, rootDirectory, directoriesToSearch);
         }
     }
 
-    private async Task FindAndAnalyzeTypeDefinition(string typeName, string searchDirectory)
+    private async Task FindAndAnalyzeTypeDefinition(string typeName, string searchDirectory, List<string>? directoriesToSearch = null)
     {
-        // Search for files that might contain this type definition
-        var candidateFiles = Directory.GetFiles(searchDirectory, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !_processedFiles.Contains(f))
-            .ToList();
+        // Use provided directories or default to just searchDirectory
+        var searchDirs = directoriesToSearch ?? new List<string> { searchDirectory };
 
-        foreach (var candidateFile in candidateFiles)
+        foreach (var dir in searchDirs)
         {
-            try
+            if (!Directory.Exists(dir))
+                continue;
+
+            // Search for files that might contain this type definition
+            var candidateFiles = Directory.GetFiles(dir, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !_processedFiles.Contains(f))
+                .ToList();
+
+            foreach (var candidateFile in candidateFiles)
             {
-                var content = await File.ReadAllTextAsync(candidateFile);
-                var tree = CSharpSyntaxTree.ParseText(content);
-                var root = tree.GetCompilationUnitRoot();
-
-                // Check if this file contains the type definition
-                var typeWalker = new TypeDefinitionWalker(typeName);
-                typeWalker.Visit(root);
-
-                if (typeWalker.FoundType)
+                try
                 {
-                    await AnalyzeFileRecursive(candidateFile, searchDirectory);
-                    break; // Found the type, no need to search more
+                    var content = await File.ReadAllTextAsync(candidateFile);
+                    var tree = CSharpSyntaxTree.ParseText(content);
+                    var root = tree.GetCompilationUnitRoot();
+
+                    // Check if this file contains the type definition
+                    var typeWalker = new TypeDefinitionWalker(typeName);
+                    typeWalker.Visit(root);
+
+                    if (typeWalker.FoundType)
+                    {
+                        // Check if this file is from a ProjectReference (different directory)
+                        var fileDir = Path.GetDirectoryName(candidateFile);
+                        var isFromProjectReference = !string.IsNullOrEmpty(fileDir) && 
+                                                      !Path.GetFullPath(fileDir).StartsWith(Path.GetFullPath(searchDirectory), StringComparison.OrdinalIgnoreCase);
+
+                        if (isFromProjectReference)
+                        {
+                            _filesFromProjectReferences.Add(candidateFile);
+                            _diagnostics.Add(new AnalysisDiagnostic
+                            {
+                                FilePath = candidateFile,
+                                Severity = DiagnosticSeverity.Info,
+                                Message = $"Including file from ProjectReference: {typeName} defined in {candidateFile}"
+                            });
+                        }
+
+                        await AnalyzeFileRecursive(candidateFile, searchDirectory, directoriesToSearch);
+                        return; // Found the type, no need to search more
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                _diagnostics.Add(new AnalysisDiagnostic
+                catch (Exception ex)
                 {
-                    FilePath = candidateFile,
-                    Severity = DiagnosticSeverity.Warning,
-                    Message = $"Error analyzing file: {ex.Message}"
-                });
+                    _diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = candidateFile,
+                        Severity = DiagnosticSeverity.Warning,
+                        Message = $"Error analyzing file: {ex.Message}"
+                    });
+                }
             }
         }
     }
@@ -281,6 +349,34 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
 
         return definedTypes;
     }
+
+    private string? ResolveProjectReferencePath(string projectReference, string referencingCsprojPath)
+    {
+        try
+        {
+            var referencingDir = Path.GetDirectoryName(referencingCsprojPath);
+            if (string.IsNullOrEmpty(referencingDir))
+                return null;
+
+            // Resolve relative path
+            var resolvedPath = Path.Combine(referencingDir, projectReference);
+            
+            // Normalize the path
+            resolvedPath = Path.GetFullPath(resolvedPath);
+
+            // If it's a .csproj file, get its directory
+            if (resolvedPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedPath = Path.GetDirectoryName(resolvedPath);
+            }
+
+            return resolvedPath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 #endregion
@@ -300,7 +396,7 @@ public class JsonResultGenerator : IJsonGenerator
         {
             sourcePath = kvp.Value.FilePath,
             bundlePath = GenerateBundlePath(kvp.Value.FilePath),
-            reason = "extracted_class_dependency"
+            reason = kvp.Value.Reason
         }).ToList();
 
         var compileIncludes = result.SourceFiles.Keys.Select(GenerateBundlePath).ToList();
@@ -348,6 +444,12 @@ public class JsonResultGenerator : IJsonGenerator
                 extendedProject["frameworkReferences"] = metadata.FrameworkReferences.Select(fr => new
                 {
                     include = fr.Include
+                });
+
+            if (metadata.ProjectReferences.Count > 0)
+                extendedProject["projectReferences"] = metadata.ProjectReferences.Select(pr => new
+                {
+                    include = pr.Include
                 });
 
             if (metadata.Diagnostics.Count > 0)
@@ -616,6 +718,24 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
                     }
                 }
             }
+
+            // Extract ProjectReference items
+            var projectReferences = doc.SelectNodes("//ProjectReference") ??
+                                     doc.SelectNodes("//ms:ProjectReference", namespaceManager);
+            if (projectReferences != null)
+            {
+                foreach (System.Xml.XmlNode projectRef in projectReferences)
+                {
+                    var include = projectRef.Attributes?.GetNamedItem("Include")?.Value;
+                    if (!string.IsNullOrEmpty(include))
+                    {
+                        metadata.ProjectReferences.Add(new ProjectReference
+                        {
+                            Include = include
+                        });
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -642,6 +762,7 @@ public class ProjectMetadata
     public string? ImplicitUsings { get; set; }
     public List<PackageReference> PackageReferences { get; set; } = new();
     public List<FrameworkReference> FrameworkReferences { get; set; } = new();
+    public List<ProjectReference> ProjectReferences { get; set; } = new();
     public List<AnalysisDiagnostic> Diagnostics { get; set; } = new();
 }
 
@@ -652,6 +773,11 @@ public class PackageReference
 }
 
 public class FrameworkReference
+{
+    public string Include { get; set; } = string.Empty;
+}
+
+public class ProjectReference
 {
     public string Include { get; set; } = string.Empty;
 }
