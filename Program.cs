@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.CommandLine;
+using System.Text.Json;
 
 namespace ClassContextAnalyzer;
 
@@ -28,7 +29,7 @@ class AnalyzerProgram
 
         var formatOption = new Option<string>(
             name: "--format",
-            description: "Output format: markdown or csharp-project",
+            description: "Output format: markdown, csharp-project, or json",
             getDefaultValue: () => "markdown");
 
         var optimizeOption = new Option<bool>(
@@ -39,7 +40,7 @@ class AnalyzerProgram
         formatOption.AddValidator(result =>
         {
             var format = result.GetValueOrDefault<string>();
-            if (format != "markdown" && format != "csharp-project")
+            if (format != "markdown" && format != "csharp-project" && format != "json")
             {
                 result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
             }
@@ -73,7 +74,11 @@ class AnalyzerProgram
                     var generator = new CSharpProjectGenerator();
                     await generator.GenerateAsync(result, output.FullName);
                 }
-
+                else if (format == "json")
+                {
+                    var generator = new JsonResultGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
                 Console.WriteLine($"Analysis complete. Output written to {output.FullName}");
                 Console.WriteLine($"Analyzed {result.SourceFiles.Count} files with {result.TypeReferences.Count} type references");
             }
@@ -259,6 +264,62 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         }
 
         return definedTypes;
+    }
+}
+
+#endregion
+
+#region JSON Result Generator
+
+public interface IJsonGenerator
+{
+    Task GenerateAsync(ClassContextAnalysisResult result, string outputPath);
+}
+
+public class JsonResultGenerator : IJsonGenerator
+{
+    public async Task GenerateAsync(ClassContextAnalysisResult result, string outputPath)
+    {
+        var files = result.SourceFiles.Select(kvp => new
+        {
+            sourcePath = kvp.Value.FilePath,
+            bundlePath = GenerateBundlePath(kvp.Value.FilePath),
+            reason = "extracted_class_dependency"
+        }).ToList();
+
+        var compileIncludes = result.SourceFiles.Keys.Select(GenerateBundlePath).ToList();
+
+        var jsonResult = new
+        {
+            files = files,
+            project = new
+            {
+                compileIncludes = compileIncludes
+            },
+            diagnostics = result.Diagnostics.Select(d => new
+            {
+                filePath = d.FilePath,
+                severity = d.Severity.ToString(),
+                message = d.Message,
+                lineNumber = d.LineNumber,
+                columnNumber = d.ColumnNumber
+            }).ToList()
+        };
+
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = true
+        };
+
+        var json = JsonSerializer.Serialize(jsonResult, options);
+        await File.WriteAllTextAsync(outputPath, json);
+    }
+
+    private string GenerateBundlePath(string sourcePath)
+    {
+        // Create a deterministic bundle path based on the source file name
+        var fileName = Path.GetFileName(sourcePath);
+        return Path.Combine("bundle", fileName);
     }
 }
 
@@ -633,7 +694,7 @@ public static class AnalyzerLauncher
 
         var formatOption = new Option<string>(
             name: "--format",
-            description: "Output format: markdown or csharp-project",
+            description: "Output format: markdown, csharp-project, or json",
             getDefaultValue: () => "markdown");
 
         var optimizeOption = new Option<bool>(
@@ -644,7 +705,7 @@ public static class AnalyzerLauncher
         formatOption.AddValidator(result =>
         {
             var format = result.GetValueOrDefault<string>();
-            if (format != "markdown" && format != "csharp-project")
+            if (format != "markdown" && format != "csharp-project" && format != "json")
             {
                 result.ErrorMessage = "Format must be either 'markdown' or 'csharp-project'";
             }
@@ -676,6 +737,11 @@ public static class AnalyzerLauncher
                 else if (format == "csharp-project")
                 {
                     var generator = new CSharpProjectGenerator();
+                    await generator.GenerateAsync(result, output.FullName);
+                }
+                else if (format == "json")
+                {
+                    var generator = new JsonResultGenerator();
                     await generator.GenerateAsync(result, output.FullName);
                 }
 

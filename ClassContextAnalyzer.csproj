@@ -11,6 +11,13 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.9.2" />
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.9.2" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="System.Text.Json" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="ClassContextAnalyzer.Tests/**/*.cs" />
+    <EmbeddedResource Remove="ClassContextAnalyzer.Tests/**/*" />
+    <None Remove="ClassContextAnalyzer.Tests/**/*" />
   </ItemGroup>
 
 </Project>
