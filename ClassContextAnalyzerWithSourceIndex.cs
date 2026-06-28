@@ -11,10 +11,20 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
     private readonly Dictionary<string, HashSet<string>> _typeReferences = new();
     private readonly Dictionary<string, HashSet<string>> _dependencyRelationships = new();
     private readonly List<AnalysisDiagnostic> _diagnostics = new();
+    private readonly IProjectMetadataExtractor _metadataExtractor;
 
     // Source index: maps type names to their file paths
     private readonly Dictionary<string, List<string>> _typeToFilesIndex = new();
     private bool _indexBuilt = false;
+
+    public ClassContextAnalyzerWithSourceIndex() : this(new ProjectMetadataExtractor())
+    {
+    }
+
+    public ClassContextAnalyzerWithSourceIndex(IProjectMetadataExtractor metadataExtractor)
+    {
+        _metadataExtractor = metadataExtractor;
+    }
 
     public async Task<ClassContextAnalysisResult> AnalyzeAsync(string filePath, string rootDirectory)
     {
@@ -28,6 +38,10 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
             });
             throw new FileNotFoundException($"File not found: {filePath}");
         }
+
+        // Extract project metadata for the input file
+        var csprojPath = _metadataExtractor.FindProjectFile(filePath);
+        var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
         // Build the source index first (single pass through all files)
         BuildSourceIndex(rootDirectory);
@@ -50,7 +64,8 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
             ),
             TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
             DependencyRelationships = new Dictionary<string, HashSet<string>>(_dependencyRelationships),
-            Diagnostics = new List<AnalysisDiagnostic>(_diagnostics)
+            Diagnostics = new List<AnalysisDiagnostic>(_diagnostics),
+            ProjectMetadata = projectMetadata
         };
     }
 

@@ -101,6 +101,7 @@ public class ClassContextAnalysisResult
     public Dictionary<string, HashSet<string>> TypeReferences { get; set; } = new();
     public Dictionary<string, HashSet<string>> DependencyRelationships { get; set; } = new();
     public List<AnalysisDiagnostic> Diagnostics { get; set; } = new();
+    public ProjectMetadata? ProjectMetadata { get; set; }
 }
 
 public class SourceFileInfo
@@ -143,6 +144,16 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
     private readonly Dictionary<string, HashSet<string>> _typeReferences = new();
     private readonly Dictionary<string, HashSet<string>> _dependencyRelationships = new();
     private readonly List<AnalysisDiagnostic> _diagnostics = new();
+    private readonly IProjectMetadataExtractor _metadataExtractor;
+
+    public ClassContextAnalyzer() : this(new ProjectMetadataExtractor())
+    {
+    }
+
+    public ClassContextAnalyzer(IProjectMetadataExtractor metadataExtractor)
+    {
+        _metadataExtractor = metadataExtractor;
+    }
 
     public async Task<ClassContextAnalysisResult> AnalyzeAsync(string filePath, string rootDirectory)
     {
@@ -156,6 +167,10 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
             });
             throw new FileNotFoundException($"File not found: {filePath}");
         }
+
+        // Extract project metadata for the input file
+        var csprojPath = _metadataExtractor.FindProjectFile(filePath);
+        var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
         // Start with initial file
         await AnalyzeFileRecursive(filePath, rootDirectory);
@@ -175,7 +190,8 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
             ),
             TypeReferences = new Dictionary<string, HashSet<string>>(_typeReferences),
             DependencyRelationships = new Dictionary<string, HashSet<string>>(_dependencyRelationships),
-            Diagnostics = new List<AnalysisDiagnostic>(_diagnostics)
+            Diagnostics = new List<AnalysisDiagnostic>(_diagnostics),
+            ProjectMetadata = projectMetadata
         };
     }
 
@@ -289,13 +305,75 @@ public class JsonResultGenerator : IJsonGenerator
 
         var compileIncludes = result.SourceFiles.Keys.Select(GenerateBundlePath).ToList();
 
+        // Build project object
+        object projectObject;
+
+        // Add project metadata if available
+        if (result.ProjectMetadata != null)
+        {
+            var metadata = result.ProjectMetadata;
+
+            // Create properties dictionary
+            var properties = new Dictionary<string, string?>();
+            if (!string.IsNullOrEmpty(metadata.Nullable))
+                properties["Nullable"] = metadata.Nullable;
+            if (!string.IsNullOrEmpty(metadata.ImplicitUsings))
+                properties["ImplicitUsings"] = metadata.ImplicitUsings;
+            if (!string.IsNullOrEmpty(metadata.LangVersion))
+                properties["LangVersion"] = metadata.LangVersion;
+
+            // Build extended project object using dictionary for flexibility
+            var extendedProject = new Dictionary<string, object>
+            {
+                ["compileIncludes"] = compileIncludes
+            };
+
+            if (!string.IsNullOrEmpty(metadata.TargetFramework))
+                extendedProject["targetFramework"] = metadata.TargetFramework;
+
+            if (metadata.TargetFrameworks.Count > 0)
+                extendedProject["targetFrameworks"] = metadata.TargetFrameworks;
+
+            if (properties.Count > 0)
+                extendedProject["properties"] = properties;
+
+            if (metadata.PackageReferences.Count > 0)
+                extendedProject["packageReferences"] = metadata.PackageReferences.Select(pr => new
+                {
+                    include = pr.Include,
+                    version = pr.Version
+                });
+
+            if (metadata.FrameworkReferences.Count > 0)
+                extendedProject["frameworkReferences"] = metadata.FrameworkReferences.Select(fr => new
+                {
+                    include = fr.Include
+                });
+
+            if (metadata.Diagnostics.Count > 0)
+                extendedProject["diagnostics"] = metadata.Diagnostics.Select(d => new
+                {
+                    filePath = d.FilePath,
+                    severity = d.Severity.ToString(),
+                    message = d.Message,
+                    lineNumber = d.LineNumber,
+                    columnNumber = d.ColumnNumber
+                });
+
+            projectObject = extendedProject;
+        }
+        else
+        {
+            projectObject = new
+            {
+                compileIncludes = compileIncludes
+            };
+        }
+
         var jsonResult = new
         {
             files = files,
-            project = new
-            {
-                compileIncludes = compileIncludes
-            },
+            project = projectObject,
             diagnostics = result.Diagnostics.Select(d => new
             {
                 filePath = d.FilePath,
@@ -397,6 +475,185 @@ public class CSharpProjectGenerator : IProjectGenerator
 
 </Project>";
     }
+}
+
+#endregion
+
+#region Project Metadata Extraction
+
+public interface IProjectMetadataExtractor
+{
+    string? FindProjectFile(string filePath);
+    ProjectMetadata? ExtractMetadata(string csprojPath);
+}
+
+public class ProjectMetadataExtractor : IProjectMetadataExtractor
+{
+    public string? FindProjectFile(string filePath)
+    {
+        if (!File.Exists(filePath))
+        {
+            return null;
+        }
+
+        var directory = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrEmpty(directory))
+        {
+            return null;
+        }
+
+        // Search upward from the file's directory for .csproj files
+        var currentDir = new DirectoryInfo(directory);
+        while (currentDir != null)
+        {
+            var csprojFiles = currentDir.GetFiles("*.csproj");
+            if (csprojFiles.Length > 0)
+            {
+                // Return the first .csproj found
+                return csprojFiles[0].FullName;
+            }
+
+            currentDir = currentDir.Parent;
+        }
+
+        return null;
+    }
+
+    public ProjectMetadata? ExtractMetadata(string csprojPath)
+    {
+        if (!File.Exists(csprojPath))
+        {
+            return null;
+        }
+
+        var metadata = new ProjectMetadata
+        {
+            ProjectPath = csprojPath
+        };
+
+        try
+        {
+            var content = File.ReadAllText(csprojPath);
+            var doc = new System.Xml.XmlDocument();
+            doc.LoadXml(content);
+
+            var namespaceManager = new System.Xml.XmlNamespaceManager(doc.NameTable);
+            namespaceManager.AddNamespace("ms", "http://schemas.microsoft.com/developer/msbuild/2003");
+
+            // Extract TargetFramework or TargetFrameworks (try without namespace first for SDK-style projects)
+            var targetFrameworkNode = doc.SelectSingleNode("//TargetFramework") ??
+                                     doc.SelectSingleNode("//ms:TargetFramework", namespaceManager);
+            if (targetFrameworkNode != null)
+            {
+                metadata.TargetFramework = targetFrameworkNode.InnerText;
+            }
+
+            var targetFrameworksNode = doc.SelectSingleNode("//TargetFrameworks") ??
+                                        doc.SelectSingleNode("//ms:TargetFrameworks", namespaceManager);
+            if (targetFrameworksNode != null && string.IsNullOrEmpty(metadata.TargetFramework))
+            {
+                metadata.TargetFrameworks = targetFrameworksNode.InnerText
+                    .Split(';', StringSplitOptions.RemoveEmptyEntries)
+                    .ToList();
+            }
+
+            // Extract other properties
+            var langVersionNode = doc.SelectSingleNode("//LangVersion") ??
+                                   doc.SelectSingleNode("//ms:LangVersion", namespaceManager);
+            if (langVersionNode != null)
+            {
+                metadata.LangVersion = langVersionNode.InnerText;
+            }
+
+            var nullableNode = doc.SelectSingleNode("//Nullable") ??
+                                doc.SelectSingleNode("//ms:Nullable", namespaceManager);
+            if (nullableNode != null)
+            {
+                metadata.Nullable = nullableNode.InnerText;
+            }
+
+            var implicitUsingsNode = doc.SelectSingleNode("//ImplicitUsings") ??
+                                      doc.SelectSingleNode("//ms:ImplicitUsings", namespaceManager);
+            if (implicitUsingsNode != null)
+            {
+                metadata.ImplicitUsings = implicitUsingsNode.InnerText;
+            }
+
+            // Extract PackageReference items
+            var packageReferences = doc.SelectNodes("//PackageReference") ??
+                                     doc.SelectNodes("//ms:PackageReference", namespaceManager);
+            if (packageReferences != null)
+            {
+                foreach (System.Xml.XmlNode packageRef in packageReferences)
+                {
+                    var include = packageRef.Attributes?.GetNamedItem("Include")?.Value;
+                    var version = packageRef.Attributes?.GetNamedItem("Version")?.Value;
+                    if (!string.IsNullOrEmpty(include))
+                    {
+                        metadata.PackageReferences.Add(new PackageReference
+                        {
+                            Include = include,
+                            Version = version
+                        });
+                    }
+                }
+            }
+
+            // Extract FrameworkReference items
+            var frameworkReferences = doc.SelectNodes("//FrameworkReference") ??
+                                       doc.SelectNodes("//ms:FrameworkReference", namespaceManager);
+            if (frameworkReferences != null)
+            {
+                foreach (System.Xml.XmlNode frameworkRef in frameworkReferences)
+                {
+                    var include = frameworkRef.Attributes?.GetNamedItem("Include")?.Value;
+                    if (!string.IsNullOrEmpty(include))
+                    {
+                        metadata.FrameworkReferences.Add(new FrameworkReference
+                        {
+                            Include = include
+                        });
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // If parsing fails, return what we have so far
+            metadata.Diagnostics.Add(new AnalysisDiagnostic
+            {
+                FilePath = csprojPath,
+                Severity = DiagnosticSeverity.Warning,
+                Message = $"Failed to parse project file: {ex.Message}"
+            });
+        }
+
+        return metadata;
+    }
+}
+
+public class ProjectMetadata
+{
+    public string ProjectPath { get; set; } = string.Empty;
+    public string? TargetFramework { get; set; }
+    public List<string> TargetFrameworks { get; set; } = new();
+    public string? LangVersion { get; set; }
+    public string? Nullable { get; set; }
+    public string? ImplicitUsings { get; set; }
+    public List<PackageReference> PackageReferences { get; set; } = new();
+    public List<FrameworkReference> FrameworkReferences { get; set; } = new();
+    public List<AnalysisDiagnostic> Diagnostics { get; set; } = new();
+}
+
+public class PackageReference
+{
+    public string Include { get; set; } = string.Empty;
+    public string? Version { get; set; }
+}
+
+public class FrameworkReference
+{
+    public string Include { get; set; } = string.Empty;
 }
 
 #endregion

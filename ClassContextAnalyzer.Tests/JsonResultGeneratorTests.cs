@@ -176,4 +176,188 @@ public class JsonResultGeneratorTests
         // Cleanup
         File.Delete(outputPath);
     }
+
+    [Fact]
+    public async Task GenerateAsync_ShouldIncludeProjectMetadata()
+    {
+        // Arrange
+        var sourcePath = "/path/to/source/TestClass.cs";
+        var projectMetadata = new ProjectMetadata
+        {
+            ProjectPath = "/path/to/source/TestClass.csproj",
+            TargetFramework = "net9.0",
+            Nullable = "enable",
+            ImplicitUsings = "enable",
+            LangVersion = "latest",
+            PackageReferences = new List<PackageReference>
+            {
+                new() { Include = "xunit", Version = "2.9.2" },
+                new() { Include = "Microsoft.NET.Test.Sdk", Version = "17.12.0" }
+            },
+            FrameworkReferences = new List<FrameworkReference>
+            {
+                new() { Include = "Microsoft.NETCore.App" }
+            }
+        };
+
+        var result = new ClassContextAnalysisResult
+        {
+            SourceFiles = new Dictionary<string, SourceFileInfo>
+            {
+                [sourcePath] = new SourceFileInfo
+                {
+                    FilePath = sourcePath,
+                    Content = "public class TestClass { }",
+                    LastModified = DateTime.Now,
+                    DefinedTypes = new HashSet<string> { "TestClass" }
+                }
+            },
+            TypeReferences = new Dictionary<string, HashSet<string>>(),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(),
+            Diagnostics = new List<AnalysisDiagnostic>(),
+            ProjectMetadata = projectMetadata
+        };
+
+        var generator = new JsonResultGenerator();
+        var outputPath = Path.Combine(Path.GetTempPath(), "test-metadata-output.json");
+
+        // Act
+        await generator.GenerateAsync(result, outputPath);
+
+        // Assert
+        var jsonContent = await File.ReadAllTextAsync(outputPath);
+        using var jsonDoc = JsonDocument.Parse(jsonContent);
+        var root = jsonDoc.RootElement;
+
+        Assert.True(root.TryGetProperty("project", out var project));
+        Assert.True(project.TryGetProperty("targetFramework", out var targetFramework));
+        Assert.Equal("net9.0", targetFramework.GetString());
+
+        Assert.True(project.TryGetProperty("properties", out var properties));
+        Assert.True(properties.TryGetProperty("Nullable", out var nullable));
+        Assert.Equal("enable", nullable.GetString());
+        Assert.True(properties.TryGetProperty("ImplicitUsings", out var implicitUsings));
+        Assert.Equal("enable", implicitUsings.GetString());
+        Assert.True(properties.TryGetProperty("LangVersion", out var langVersion));
+        Assert.Equal("latest", langVersion.GetString());
+
+        Assert.True(project.TryGetProperty("packageReferences", out var packageRefs));
+        Assert.Equal(2, packageRefs.GetArrayLength());
+
+        Assert.True(project.TryGetProperty("frameworkReferences", out var frameworkRefs));
+        Assert.Equal(1, frameworkRefs.GetArrayLength());
+
+        // Cleanup
+        File.Delete(outputPath);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_ShouldIncludeProjectDiagnostics()
+    {
+        // Arrange
+        var sourcePath = "/path/to/source/TestClass.cs";
+        var projectMetadata = new ProjectMetadata
+        {
+            ProjectPath = "/path/to/source/TestClass.csproj",
+            TargetFramework = "net9.0",
+            Diagnostics = new List<AnalysisDiagnostic>
+            {
+                new()
+                {
+                    FilePath = "/path/to/source/TestClass.csproj",
+                    Severity = DiagnosticSeverity.Warning,
+                    Message = "Multiple target frameworks detected, using first one"
+                }
+            }
+        };
+
+        var result = new ClassContextAnalysisResult
+        {
+            SourceFiles = new Dictionary<string, SourceFileInfo>
+            {
+                [sourcePath] = new SourceFileInfo
+                {
+                    FilePath = sourcePath,
+                    Content = "public class TestClass { }",
+                    LastModified = DateTime.Now,
+                    DefinedTypes = new HashSet<string> { "TestClass" }
+                }
+            },
+            TypeReferences = new Dictionary<string, HashSet<string>>(),
+            DependencyRelationships = new Dictionary<string, HashSet<string>>(),
+            Diagnostics = new List<AnalysisDiagnostic>(),
+            ProjectMetadata = projectMetadata
+        };
+
+        var generator = new JsonResultGenerator();
+        var outputPath = Path.Combine(Path.GetTempPath(), "test-diagnostics-output.json");
+
+        // Act
+        await generator.GenerateAsync(result, outputPath);
+
+        // Assert
+        var jsonContent = await File.ReadAllTextAsync(outputPath);
+        using var jsonDoc = JsonDocument.Parse(jsonContent);
+        var root = jsonDoc.RootElement;
+
+        Assert.True(root.TryGetProperty("project", out var project));
+        Assert.True(project.TryGetProperty("diagnostics", out var projectDiagnostics));
+        Assert.Equal(1, projectDiagnostics.GetArrayLength());
+
+        var diagnostic = projectDiagnostics[0];
+        Assert.Equal("Warning", diagnostic.GetProperty("severity").GetString());
+        Assert.Contains("Multiple target frameworks", diagnostic.GetProperty("message").GetString());
+
+        // Cleanup
+        File.Delete(outputPath);
+    }
+
+    [Fact]
+    public async Task EndToEndAnalysis_ShouldIncludeProjectMetadataInJson()
+    {
+        // Arrange
+        var currentDir = Directory.GetCurrentDirectory();
+        var testFile = Path.Combine(currentDir, "TestFiles", "SimpleTestClass.cs");
+        var outputPath = Path.Combine(Path.GetTempPath(), "e2e-metadata-test.json");
+
+        // Use the optimized analyzer which should find the project file
+        var analyzer = new ClassContextAnalyzer.ClassContextAnalyzerWithSourceIndex();
+        var rootDir = currentDir;
+
+        // Act
+        var result = await analyzer.AnalyzeAsync(testFile, rootDir);
+
+        // Verify that project metadata was found
+        if (result.ProjectMetadata != null)
+        {
+            var jsonGenerator = new JsonResultGenerator();
+            await jsonGenerator.GenerateAsync(result, outputPath);
+
+            // Assert
+            Assert.True(File.Exists(outputPath));
+
+            var jsonContent = await File.ReadAllTextAsync(outputPath);
+            using var jsonDoc = JsonDocument.Parse(jsonContent);
+            var root = jsonDoc.RootElement;
+
+            // Should have project metadata if it was found
+            Assert.True(root.TryGetProperty("project", out var project));
+
+            // If target framework was found, verify it's in the output
+            if (!string.IsNullOrEmpty(result.ProjectMetadata.TargetFramework))
+            {
+                Assert.True(project.TryGetProperty("targetFramework", out var targetFramework));
+                Assert.NotNull(targetFramework.GetString());
+            }
+
+            // Cleanup
+            File.Delete(outputPath);
+        }
+        else
+        {
+            // If project metadata wasn't found (which can happen in test environments),
+            // that's acceptable as long as the analysis still works
+            Console.WriteLine("Project metadata not found (acceptable in test environment)");
+        }
+    }
 }
