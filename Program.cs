@@ -179,6 +179,24 @@ public class ClassContextAnalyzer : IClassContextAnalyzer
         var csprojPath = _metadataExtractor.FindProjectFile(filePath);
         var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
+        // Check for unsupported extraction cases before proceeding
+        if (projectMetadata != null)
+        {
+            var errorDiagnostics = projectMetadata.Diagnostics
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .ToList();
+
+            if (errorDiagnostics.Any())
+            {
+                // Add error diagnostics to our collection
+                _diagnostics.AddRange(errorDiagnostics);
+
+                // Throw explicit exception for unsupported extraction cases
+                throw new InvalidOperationException(
+                    $"Cannot safely extract project due to unsupported features: {string.Join("; ", errorDiagnostics.Select(d => d.Message))}");
+            }
+        }
+
         // Collect all directories to search (including ProjectReferences)
         var directoriesToSearch = new List<string> { rootDirectory };
         
@@ -814,7 +832,7 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
 
             // Extract ProjectReference items
             var projectReferences = doc.SelectNodes("//ProjectReference") ??
-                                     doc.SelectNodes("//ms:ProjectReference", namespaceManager);
+                                      doc.SelectNodes("//ms:ProjectReference", namespaceManager);
             if (projectReferences != null)
             {
                 foreach (System.Xml.XmlNode projectRef in projectReferences)
@@ -829,6 +847,9 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
                     }
                 }
             }
+
+            // Detect unsupported extraction cases
+            DetectUnsupportedExtractionCases(csprojPath, doc, namespaceManager, metadata);
         }
         catch (Exception ex)
         {
@@ -842,6 +863,200 @@ public class ProjectMetadataExtractor : IProjectMetadataExtractor
         }
 
         return metadata;
+    }
+
+    private void DetectUnsupportedExtractionCases(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    {
+        // Detect source generators (ProjectReferences with OutputItemType="Analyzer" and ReferenceOutputAssembly="false")
+        DetectSourceGenerators(csprojPath, doc, namespaceManager, metadata);
+
+        // Detect custom MSBuild targets/imports
+        DetectCustomMsBuildTargets(csprojPath, doc, namespaceManager, metadata);
+
+        // Detect analyzer packages
+        DetectAnalyzerPackages(csprojPath, metadata);
+
+        // Detect unsafe conditional metadata
+        DetectUnsafeConditionalMetadata(csprojPath, doc, namespaceManager, metadata);
+    }
+
+    private void DetectSourceGenerators(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    {
+        var projectReferences = doc.SelectNodes("//ProjectReference") ??
+                                  doc.SelectNodes("//ms:ProjectReference", namespaceManager);
+
+        if (projectReferences != null)
+        {
+            foreach (System.Xml.XmlNode projectRef in projectReferences)
+            {
+                var outputItemType = projectRef.Attributes?.GetNamedItem("OutputItemType")?.Value;
+                var referenceOutputAssembly = projectRef.Attributes?.GetNamedItem("ReferenceOutputAssembly")?.Value;
+                var include = projectRef.Attributes?.GetNamedItem("Include")?.Value;
+
+                // Source generators have OutputItemType="Analyzer" and ReferenceOutputAssembly="false"
+                if (!string.IsNullOrEmpty(outputItemType) &&
+                    outputItemType.Equals("Analyzer", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(referenceOutputAssembly) &&
+                    referenceOutputAssembly.Equals("false", StringComparison.OrdinalIgnoreCase))
+                {
+                    metadata.Diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath,
+                        Severity = DiagnosticSeverity.Error,
+                        Message = $"Source generator detected: {include}. Source generators generate code at compile time and cannot be safely extracted. The extracted bundle will be incomplete and may not compile correctly."
+                    });
+                }
+            }
+        }
+    }
+
+    private void DetectCustomMsBuildTargets(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    {
+        // Detect custom Import elements
+        var imports = doc.SelectNodes("//Import") ??
+                      doc.SelectNodes("//ms:Import", namespaceManager);
+
+        if (imports != null)
+        {
+            foreach (System.Xml.XmlNode import in imports)
+            {
+                var project = import.Attributes?.GetNamedItem("Project")?.Value;
+                if (!string.IsNullOrEmpty(project))
+                {
+                    metadata.Diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath,
+                        Severity = DiagnosticSeverity.Error,
+                        Message = $"Custom MSBuild import detected: {project}. Custom MSBuild targets can modify compilation behavior and cannot be safely extracted. The extracted bundle may not compile correctly."
+                    });
+                }
+            }
+        }
+
+        // Detect custom Target elements
+        var targets = doc.SelectNodes("//Target") ??
+                      doc.SelectNodes("//ms:Target", namespaceManager);
+
+        if (targets != null)
+        {
+            foreach (System.Xml.XmlNode target in targets)
+            {
+                var targetName = target.Attributes?.GetNamedItem("Name")?.Value;
+                var beforeTargets = target.Attributes?.GetNamedItem("BeforeTargets")?.Value;
+                var afterTargets = target.Attributes?.GetNamedItem("AfterTargets")?.Value;
+
+                // Custom targets that hook into compilation are unsafe
+                if (!string.IsNullOrEmpty(beforeTargets) || !string.IsNullOrEmpty(afterTargets))
+                {
+                    metadata.Diagnostics.Add(new AnalysisDiagnostic
+                    {
+                        FilePath = csprojPath,
+                        Severity = DiagnosticSeverity.Error,
+                        Message = $"Custom MSBuild target detected: {targetName}. Custom MSBuild targets can modify compilation behavior and cannot be safely extracted. The extracted bundle may not compile correctly."
+                    });
+                }
+            }
+        }
+    }
+
+    private void DetectAnalyzerPackages(string csprojPath, ProjectMetadata metadata)
+    {
+        // Known analyzer package patterns
+        var analyzerPackagePatterns = new[]
+        {
+            "Microsoft.CodeAnalysis.Analyzers",
+            "Microsoft.CodeAnalysis.CSharp.Analyzers",
+            "Microsoft.CodeAnalysis.VisualBasic.Analyzers",
+            "SonarAnalyzer.CSharp",
+            "SonarAnalyzer.VisualBasic",
+            "StyleCop.Analyzers",
+            "Roslynator.Analyzers",
+            "DotNetAnalyzers",
+            "ErrorProne.NET.CoreAnalyzers",
+            "Meziantou.Analyzer"
+        };
+
+        foreach (var packageRef in metadata.PackageReferences)
+        {
+            if (analyzerPackagePatterns.Any(pattern =>
+                packageRef.Include.Equals(pattern, StringComparison.OrdinalIgnoreCase) ||
+                packageRef.Include.Contains("Analyzer", StringComparison.OrdinalIgnoreCase) ||
+                packageRef.Include.Contains("Analyzers", StringComparison.OrdinalIgnoreCase)))
+            {
+                metadata.Diagnostics.Add(new AnalysisDiagnostic
+                {
+                    FilePath = csprojPath,
+                    Severity = DiagnosticSeverity.Error,
+                    Message = $"Analyzer package detected: {packageRef.Include}. Analyzer packages can provide diagnostics and code fixes that affect compilation behavior. While the bundle may compile, it may have different behavior than the original project."
+                });
+            }
+        }
+    }
+
+    private void DetectUnsafeConditionalMetadata(string csprojPath, System.Xml.XmlDocument doc, System.Xml.XmlNamespaceManager namespaceManager, ProjectMetadata metadata)
+    {
+        // Known unsafe MSBuild properties that affect compilation
+        var unsafeProperties = new[]
+        {
+            "BuildConfiguration",
+            "RuntimeIdentifier",
+            "TargetFrameworkVersion",
+            "Platform",
+            "Configuration",
+            "DefineConstants",
+            "OutputPath",
+            "IntermediateOutputPath"
+        };
+
+        // Detect PropertyGroup with Condition attributes
+        var propertyGroups = doc.SelectNodes("//PropertyGroup") ??
+                            doc.SelectNodes("//ms:PropertyGroup", namespaceManager);
+
+        if (propertyGroups != null)
+        {
+            foreach (System.Xml.XmlNode propertyGroup in propertyGroups)
+            {
+                var condition = propertyGroup.Attributes?.GetNamedItem("Condition")?.Value;
+                if (!string.IsNullOrEmpty(condition))
+                {
+                    // Check if condition references unsafe properties
+                    if (unsafeProperties.Any(prop => condition.Contains($"$({prop})", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        metadata.Diagnostics.Add(new AnalysisDiagnostic
+                        {
+                            FilePath = csprojPath,
+                            Severity = DiagnosticSeverity.Error,
+                            Message = $"Unsafe conditional metadata detected: {condition}. Conditional compilation based on build-time properties cannot be safely evaluated. The extracted bundle may not compile correctly."
+                        });
+                    }
+                }
+            }
+        }
+
+        // Detect ItemGroup with Condition attributes
+        var itemGroups = doc.SelectNodes("//ItemGroup") ??
+                         doc.SelectNodes("//ms:ItemGroup", namespaceManager);
+
+        if (itemGroups != null)
+        {
+            foreach (System.Xml.XmlNode itemGroup in itemGroups)
+            {
+                var condition = itemGroup.Attributes?.GetNamedItem("Condition")?.Value;
+                if (!string.IsNullOrEmpty(condition))
+                {
+                    // Check if condition references unsafe properties
+                    if (unsafeProperties.Any(prop => condition.Contains($"$({prop})", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        metadata.Diagnostics.Add(new AnalysisDiagnostic
+                        {
+                            FilePath = csprojPath,
+                            Severity = DiagnosticSeverity.Error,
+                            Message = $"Unsafe conditional metadata detected: {condition}. Conditional compilation based on build-time properties cannot be safely evaluated. The extracted bundle may not compile correctly."
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 

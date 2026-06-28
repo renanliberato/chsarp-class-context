@@ -46,6 +46,24 @@ public class ClassContextAnalyzerWithSourceIndex : IClassContextAnalyzer
         var csprojPath = _metadataExtractor.FindProjectFile(filePath);
         var projectMetadata = csprojPath != null ? _metadataExtractor.ExtractMetadata(csprojPath) : null;
 
+        // Check for unsupported extraction cases before proceeding
+        if (projectMetadata != null)
+        {
+            var errorDiagnostics = projectMetadata.Diagnostics
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .ToList();
+
+            if (errorDiagnostics.Any())
+            {
+                // Add error diagnostics to our collection
+                _diagnostics.AddRange(errorDiagnostics);
+
+                // Throw explicit exception for unsupported extraction cases
+                throw new InvalidOperationException(
+                    $"Cannot safely extract project due to unsupported features: {string.Join("; ", errorDiagnostics.Select(d => d.Message))}");
+            }
+        }
+
         // Collect all directories to index (including ProjectReferences)
         var directoriesToIndex = new List<string> { rootDirectory };
         
